@@ -3,55 +3,52 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-<title>Record → Clipboard → Close (Same Shortcut)</title>
+<title>Record → Clipboard → Close → Run Shortcut</title>
 <style>
   body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto; padding:20px; }
   h1 { font-size:18px; margin:0 0 10px; }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:10px 0; }
   button { padding:10px 14px; border:0; border-radius:10px; background:#007aff; color:#fff; font-size:16px; }
   button[disabled]{ opacity:.5; }
-  #timer { min-width:80px; font-variant-numeric:tabular-nums; }
+  #timer { min-width:80px; font-variant-numeric: tabular-nums; }
   audio { width:100%; margin-top:12px; }
-  #status { font-size:13px; color:#666; margin-top:8px; line-height:1.4; }
+  /* execCommand 폴백이 실제 선택을 요구하는 iOS용: 화면 안쪽 배치 */
   #b64, #dataurl { position:fixed; bottom:-9999px; left:0; width:1px; height:1px; opacity:0.001; }
 </style>
 </head>
 <body>
-  <h1>오디오 녹음 → 클립보드 복사 → Web View 닫기</h1>
+  <h1>오디오 녹음</h1>
   <div class="row">
     <button id="recordBtn">Record</button>
     <button id="doneBtn" disabled>Done</button>
     <span id="timer">00:00</span>
   </div>
   <audio id="player" controls></audio>
-  <div id="status" aria-live="polite"></div>
 
+  <!-- 백업/폴백 -->
   <textarea id="b64" readonly></textarea>
   <textarea id="dataurl" readonly></textarea>
 
 <script>
 (() => {
+  const qs = new URLSearchParams(location.search);
+  const SHORTCUT_NAME = (qs.get('shortcut') || 'Save Recording').trim();
+
   const recordBtn = document.getElementById('recordBtn');
   const doneBtn   = document.getElementById('doneBtn');
   const timerEl   = document.getElementById('timer');
   const player    = document.getElementById('player');
   const b64TA     = document.getElementById('b64');
   const dataTA    = document.getElementById('dataurl');
-  const statusEl  = document.getElementById('status');
 
   let mediaRecorder=null, chunks=[], startTs=0, tickId=0;
   let lastBase64='', lastName='', lastMime='';
 
-  const fmt = ms => {
-    const s=Math.floor(ms/1000);
-    const m=String(Math.floor(s/60)).padStart(2,'0');
-    const ss=String(s%60).padStart(2,'0');
-    return `${m}:${ss}`;
-  };
+  const fmt = ms => { const s=Math.floor(ms/1000), m=String(Math.floor(s/60)).padStart(2,'0'), ss=String(s%60).padStart(2,'0'); return `${m}:${ss}`; };
 
   function pickMime(){
     const cands = [
-      'audio/mp4;codecs=mp4a.40.2',
+      'audio/mp4;codecs=mp4a.40.2', // m4a 우선 (Safari 친화)
       'audio/mp4',
       'audio/webm;codecs=opus',
       'audio/webm'
@@ -65,44 +62,44 @@
   function blobToDataURL(blob){
     return new Promise((res,rej)=>{
       const fr=new FileReader();
-      fr.onload=()=>res(fr.result);
-      fr.onerror=rej;
+      fr.onload = ()=>res(fr.result); // data:audio/...;base64,AAAA...
+      fr.onerror= rej;
       fr.readAsDataURL(blob);
     });
   }
 
   async function copyTextRobust(text){
-    if (!(location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
-      throw new Error('Not secure context');
-    }
+    // 1) 최신 API (보안 맥락 필요)
     try{
-      if (navigator.clipboard && window.isSecureContext){
+      if ((location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))
+          && navigator.clipboard && window.isSecureContext){
         await navigator.clipboard.writeText(text);
         return;
       }
     }catch(e){}
+
+    // 2) 임시 textarea + execCommand
     try{
       const ta = document.createElement('textarea');
       ta.value = text;
       ta.setAttribute('readonly','');
       ta.style.position = 'fixed';
-      ta.style.opacity = '0.001';
+      ta.style.left = '0'; ta.style.bottom = '0'; ta.style.opacity = '0.001';
       document.body.appendChild(ta);
       ta.focus(); ta.select(); ta.setSelectionRange(0, ta.value.length);
       const ok = document.execCommand('copy');
       document.body.removeChild(ta);
       if (ok) return;
     }catch(e){}
+
+    // 3) 화면 내 숨김 textarea로 재시도
     b64TA.value = text;
-    b64TA.focus();
-    b64TA.select();
-    b64TA.setSelectionRange(0, b64TA.value.length);
+    b64TA.focus(); b64TA.select(); b64TA.setSelectionRange(0, b64TA.value.length);
     const ok3 = document.execCommand('copy');
     if (ok3) return;
+
     throw new Error('Copy failed');
   }
-
-  function setStatus(msg){ statusEl.textContent = msg || ''; }
 
   async function startRec(){
     if (!navigator.mediaDevices?.getUserMedia){
@@ -128,17 +125,17 @@
 
       const dataURL = await blobToDataURL(blob);
       dataTA.value = dataURL;
-      lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);
+      lastBase64 = dataURL.slice(dataURL.indexOf(',')+1); // 순수 Base64
       b64TA.value = lastBase64;
 
-      doneBtn.disabled = false;
-      setStatus('');
+      // 제목에 파일명 남겨두면 필요 시 Shortcuts가 읽어서 이름으로 사용 가능
       document.title = `Audio Ready: ${lastName}`;
+
+      doneBtn.disabled = false;
     };
 
     startTs = Date.now();
     tickId = setInterval(()=> timerEl.textContent = fmt(Date.now()-startTs), 250);
-    setStatus('녹음 중…');
     mediaRecorder.start(250);
     recordBtn.textContent = 'Stop';
     doneBtn.disabled = true;
@@ -149,7 +146,6 @@
     mediaRecorder.stop();
     mediaRecorder.stream.getTracks().forEach(t=>t.stop());
     recordBtn.textContent = 'Record';
-    setStatus('녹음 종료.');
   }
 
   async function onRecordClick(){
@@ -164,17 +160,20 @@
         timerEl.textContent = '00:00';
         recordBtn.textContent = 'Record';
         mediaRecorder = null;
-        setStatus('');
       }
     }
   }
 
   async function onDoneClick(){
-    if (!lastBase64){ alert('복사할 녹음이 없습니다. 먼저 녹음을 완료하세요.'); return; }
+    if (!lastBase64){
+      alert('복사할 녹음이 없습니다. 먼저 녹음을 완료하세요.');
+      return;
+    }
     try {
       await copyTextRobust(lastBase64);
-      // ✅ 복사 완료 후 Web View 닫기 (현재 단축어 계속 진행)
-      location.href = "shortcuts://close";
+      // 복사 완료 후: 현재 Web View 닫히고, Save Recording 단축어 실행
+      const url = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME);
+      location.href = url;
     } catch (e) {
       alert('복사에 실패했습니다. 페이지 본문에서 직접 복사하세요.');
     }
@@ -183,8 +182,9 @@
   recordBtn.addEventListener('click', onRecordClick);
   doneBtn.addEventListener('click', onDoneClick);
 
-  if (!(location.protocol === 'https:' || location.hostname === 'localhost')){
-    console.warn('HTTPS 또는 localhost에서 실행해야 클립보드 복사가 안정적으로 동작합니다.');
+  // 콘솔 안내: HTTPS/localhost 권장
+  if (!(location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))) {
+    console.warn('HTTPS 또는 localhost에서 실행해야 마이크/클립보드가 안정적으로 동작합니다.');
   }
 })();
 </script>
