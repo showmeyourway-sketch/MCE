@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-<title>Record → Clipboard → Close</title>
+<title>Record → Clipboard → Close (Same Shortcut)</title>
 <style>
   body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto; padding:20px; }
   h1 { font-size:18px; margin:0 0 10px; }
@@ -17,7 +17,7 @@
 </style>
 </head>
 <body>
-  <h1>오디오 녹음 → 클립보드 복사 → 단축어 실행</h1>
+  <h1>오디오 녹음 → 클립보드 복사 → Web View 닫기</h1>
   <div class="row">
     <button id="recordBtn">Record</button>
     <button id="doneBtn" disabled>Done</button>
@@ -87,8 +87,6 @@
       ta.setAttribute('readonly','');
       ta.style.position = 'fixed';
       ta.style.opacity = '0.001';
-      ta.style.left = '0';
-      ta.style.bottom = '0';
       document.body.appendChild(ta);
       ta.focus(); ta.select(); ta.setSelectionRange(0, ta.value.length);
       const ok = document.execCommand('copy');
@@ -128,7 +126,6 @@
       lastName = `recording_${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
       player.src = URL.createObjectURL(blob);
 
-      setStatus('인코딩 중…');
       const dataURL = await blobToDataURL(blob);
       dataTA.value = dataURL;
       lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);
@@ -176,8 +173,8 @@
     if (!lastBase64){ alert('복사할 녹음이 없습니다. 먼저 녹음을 완료하세요.'); return; }
     try {
       await copyTextRobust(lastBase64);
-      // ✅ 복사 완료 후 Web View 닫고, "Save Recording" 단축어 실행
-      location.href = "shortcuts://run-shortcut?name=Save%20Recording";
+      // ✅ 복사 완료 후 Web View 닫기 (현재 단축어 계속 진행)
+      location.href = "shortcuts://close";
     } catch (e) {
       alert('복사에 실패했습니다. 페이지 본문에서 직접 복사하세요.');
     }
