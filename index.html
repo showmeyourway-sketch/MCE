@@ -3,50 +3,98 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-<title>Record → Shortcuts (Save Recording)</title>
+<title>Record → Clipboard (Base64)</title>
 <style>
   body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto; padding:20px; }
+  h1 { font-size:18px; margin:0 0 10px; }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:10px 0; }
   button { padding:10px 14px; border:0; border-radius:10px; background:#007aff; color:#fff; font-size:16px; }
   button[disabled]{ opacity:.5; }
   #timer { min-width:80px; font-variant-numeric:tabular-nums; }
   audio { width:100%; margin-top:12px; }
-  #dataurl { position:absolute; left:-9999px; }
+  #status { font-size:13px; color:#666; }
+  /* 폴백용: 수동복사/본문전달 */
+  #b64, #dataurl { position:absolute; left:-9999px; width:1px; height:1px; }
 </style>
 </head>
 <body>
-  <h1>오디오 녹음 → Shortcuts로 전송 (Save Recording)</h1>
+  <h1>오디오 녹음 → 클립보드(Base64)</h1>
   <div class="row">
     <button id="recordBtn">Record</button>
     <span id="timer">00:00</span>
   </div>
+  <div class="row">
+    <button id="copyBtn" style="display:none">Copy Again</button>
+    <span id="status"></span>
+  </div>
   <audio id="player" controls></audio>
+
+  <!-- 폴백/백업 -->
+  <textarea id="b64" readonly></textarea>
   <textarea id="dataurl" readonly></textarea>
 
 <script>
 (() => {
-  const qp = new URLSearchParams(location.search);
-  const HANDLER   = qp.get('handler')   || 'Save Recording'; // 👈 여기 이름 변경됨
-  const CHUNK_LEN = parseInt(qp.get('chunksize')||'80000', 10);
   const recordBtn = document.getElementById('recordBtn');
+  const copyBtn   = document.getElementById('copyBtn');
   const timerEl   = document.getElementById('timer');
+  const statusEl  = document.getElementById('status');
   const player    = document.getElementById('player');
+  const b64TA     = document.getElementById('b64');
   const dataTA    = document.getElementById('dataurl');
 
   let mediaRecorder=null, chunks=[], startTs=0, tickId=0;
+  let lastBase64='', lastName='', lastMime='';
 
   const fmt = ms => { const s=Math.floor(ms/1000), m=String(Math.floor(s/60)).padStart(2,'0'), ss=String(s%60).padStart(2,'0'); return `${m}:${ss}`; };
-  const mh  = () => window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[HANDLER];
-  const post= payload => { try { if (mh()) { mh().postMessage(payload); return true; } } catch(e){} return false; };
-  const pickMime = () => {
-    const list = ['audio/mp4;codecs=mp4a.40.2','audio/mp4','audio/webm;codecs=opus','audio/webm'];
-    for (const m of list) if (window.MediaRecorder?.isTypeSupported?.(m)) return m;
-    return '';
-  };
-  const blobToDataURL = b => new Promise((res,rej)=>{ const fr=new FileReader(); fr.onload=()=>res(fr.result); fr.onerror=rej; fr.readAsDataURL(b); });
+
+  function pickMime(){
+    const cands = [
+      'audio/mp4;codecs=mp4a.40.2', // Safari 친화(m4a)
+      'audio/mp4',
+      'audio/webm;codecs=opus',
+      'audio/webm'
+    ];
+    for (const m of cands){
+      if (window.MediaRecorder?.isTypeSupported?.(m)) return m;
+    }
+    return ''; // 브라우저 기본
+  }
+
+  function blobToDataURL(blob){
+    return new Promise((res,rej)=>{
+      const fr = new FileReader();
+      fr.onload = () => res(fr.result); // data:audio/...;base64,AAAA...
+      fr.onerror = rej;
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  async function tryCopy(text){
+    // 1) 최신 API
+    try{
+      if (navigator.clipboard && window.isSecureContext){
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    }catch(e){}
+    // 2) execCommand 폴백
+    try{
+      b64TA.value = text;
+      b64TA.select();
+      document.execCommand('copy');
+      return true;
+    }catch(e){}
+    return false;
+  }
+
+  function setStatus(msg){ statusEl.textContent = msg; }
 
   async function startRec(){
-    if (!navigator.mediaDevices?.getUserMedia) { alert('이 환경에서는 마이크 접근을 지원하지 않습니다. HTTPS 또는 localhost로 실행하세요.'); return; }
+    if (!navigator.mediaDevices?.getUserMedia){
+      alert('이 환경에서는 마이크 접근을 지원하지 않습니다. HTTPS 또는 localhost에서 실행하세요.');
+      return;
+    }
     const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
     chunks = [];
     const mime = pickMime();
@@ -54,34 +102,43 @@
 
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
     mediaRecorder.onstop = async () => {
+      clearInterval(tickId);
+      timerEl.textContent = '00:00';
+
       const type = mediaRecorder.mimeType || 'audio/mp4';
       const blob = new Blob(chunks, { type });
+      lastMime = type;
       const ext  = type.includes('mp4') ? 'm4a' : (type.includes('webm') ? 'webm' : 'm4a');
-      const name = `recording_${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
+      lastName = `recording_${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
       player.src = URL.createObjectURL(blob);
 
-      const dataURL = await blobToDataURL(blob);
-      dataTA.value = dataURL;
-      document.title = `Audio Ready: ${name}`;
+      setStatus('인코딩 중…');
+      const dataURL = await blobToDataURL(blob);            // data:audio/...;base64,AAAA...
+      dataTA.value = dataURL;                               // 백업(본문으로도 가져갈 수 있음)
+      lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);   // 순수 Base64만
+      b64TA.value = lastBase64;
 
-      const base64 = dataURL.slice(dataURL.indexOf(',')+1);
-      const total  = Math.ceil(base64.length / CHUNK_LEN);
-      const id     = `rec-${Date.now()}`;
-
-      const bridged = post({ type:'audioStart', id, name, mime:type, total });
-      if (bridged) {
-        for (let i=0;i<total;i++){
-          post({ type:'audioChunk', id, idx:i, data: base64.slice(i*CHUNK_LEN, (i+1)*CHUNK_LEN) });
-        }
-        post({ type:'audioDone', id });
+      // 클립보드 자동 복사 시도
+      setStatus('클립보드에 복사 중…');
+      const ok = await tryCopy(lastBase64);
+      if (ok){
+        setStatus(`복사 완료! Shortcuts에서 "Get Clipboard → Base64 Decode (File) → Save File"로 저장하세요. (파일명: ${lastName})`);
+      } else {
+        setStatus('자동 복사 실패. "Copy Again"을 눌러 복사하세요.');
+        copyBtn.style.display = 'inline-block';
       }
 
-      resetUI();
+      // 타이틀에도 메타 남기기(백업): 제목/본문으로도 Shortcuts에서 읽기 가능
+      document.title = `Audio Ready: ${lastName}`;
+      // 버튼/상태 원복
+      recordBtn.textContent = 'Record';
+      mediaRecorder = null;
     };
 
+    // 타이머
     startTs = Date.now();
-    timerEl.textContent = '00:00';
     tickId = setInterval(()=> timerEl.textContent = fmt(Date.now()-startTs), 250);
+    setStatus('녹음 중…');
     mediaRecorder.start(250);
     recordBtn.textContent = 'Stop';
   }
@@ -90,27 +147,39 @@
     if (!mediaRecorder) return;
     mediaRecorder.stop();
     mediaRecorder.stream.getTracks().forEach(t=>t.stop());
-    clearInterval(tickId);
-  }
-
-  function resetUI(){
-    mediaRecorder = null;
-    clearInterval(tickId);
-    timerEl.textContent = '00:00';
-    recordBtn.textContent = 'Record';
   }
 
   async function onRecordClick(){
-    if (mediaRecorder && mediaRecorder.state === 'recording') stopRec();
-    else {
+    if (mediaRecorder && mediaRecorder.state === 'recording'){
+      stopRec();
+    } else {
       try { await startRec(); }
-      catch(e){ console.error(e); alert('마이크 권한 또는 녹음 시작 실패.\n• HTTPS/localhost인지 확인\n• 설정 > Safari > 마이크 허용'); resetUI(); }
+      catch(e){
+        console.error(e);
+        alert('마이크 권한 또는 녹음 시작에 실패했습니다.\n• HTTPS/localhost인지 확인\n• iOS 설정 > Safari > 마이크: 허용/요청');
+        recordBtn.textContent = 'Record';
+        setStatus('');
+        clearInterval(tickId);
+        timerEl.textContent = '00:00';
+        mediaRecorder = null;
+      }
     }
   }
 
+  async function onCopyAgain(){
+    if (!lastBase64){
+      alert('복사할 데이터가 없습니다. 먼저 녹음하세요.');
+      return;
+    }
+    const ok = await tryCopy(lastBase64);
+    setStatus(ok
+      ? `복사 완료! 파일명: ${lastName}`
+      : '복사 실패. 입력창을 길게 눌러 전체 선택 후 수동 복사하세요.');
+  }
+
+  // 바인딩
   recordBtn.addEventListener('click', onRecordClick);
-  post({ type:'ready', ts:Date.now() });
-})();
-</script>
-</body>
-</html>
+  copyBtn.addEventListener('click', onCopyAgain);
+
+  // 권장 안내
+  if (!(location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1
