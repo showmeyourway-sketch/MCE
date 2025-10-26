@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-<title>Record → Clipboard (Base64)</title>
+<title>Record → Clipboard (Quiet Done)</title>
 <style>
   body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto; padding:20px; }
   h1 { font-size:18px; margin:0 0 10px; }
@@ -12,45 +12,45 @@
   button[disabled]{ opacity:.5; }
   #timer { min-width:80px; font-variant-numeric:tabular-nums; }
   audio { width:100%; margin-top:12px; }
-  #status { font-size:13px; color:#666; }
-  /* 폴백용: 수동복사/본문전달 */
+  #status { font-size:13px; color:#666; margin-top:8px; line-height:1.4; }
   #b64, #dataurl { position:absolute; left:-9999px; width:1px; height:1px; }
 </style>
 </head>
 <body>
-  <h1>오디오 녹음 → 클립보드(Base64)</h1>
+  <h1>오디오 녹음 → 클립보드로 복사</h1>
   <div class="row">
     <button id="recordBtn">Record</button>
+    <button id="doneBtn" disabled>Done</button>
     <span id="timer">00:00</span>
   </div>
-  <div class="row">
-    <button id="copyBtn" style="display:none">Copy Again</button>
-    <span id="status"></span>
-  </div>
   <audio id="player" controls></audio>
-
-  <!-- 폴백/백업 -->
+  <div id="status"></div>
   <textarea id="b64" readonly></textarea>
   <textarea id="dataurl" readonly></textarea>
 
 <script>
 (() => {
   const recordBtn = document.getElementById('recordBtn');
-  const copyBtn   = document.getElementById('copyBtn');
+  const doneBtn   = document.getElementById('doneBtn');
   const timerEl   = document.getElementById('timer');
-  const statusEl  = document.getElementById('status');
   const player    = document.getElementById('player');
   const b64TA     = document.getElementById('b64');
   const dataTA    = document.getElementById('dataurl');
+  const statusEl  = document.getElementById('status');
 
   let mediaRecorder=null, chunks=[], startTs=0, tickId=0;
   let lastBase64='', lastName='', lastMime='';
 
-  const fmt = ms => { const s=Math.floor(ms/1000), m=String(Math.floor(s/60)).padStart(2,'0'), ss=String(s%60).padStart(2,'0'); return `${m}:${ss}`; };
+  const fmt = ms => {
+    const s=Math.floor(ms/1000);
+    const m=String(Math.floor(s/60)).padStart(2,'0');
+    const ss=String(s%60).padStart(2,'0');
+    return `${m}:${ss}`;
+  };
 
   function pickMime(){
     const cands = [
-      'audio/mp4;codecs=mp4a.40.2', // Safari 친화(m4a)
+      'audio/mp4;codecs=mp4a.40.2',
       'audio/mp4',
       'audio/webm;codecs=opus',
       'audio/webm'
@@ -58,37 +58,35 @@
     for (const m of cands){
       if (window.MediaRecorder?.isTypeSupported?.(m)) return m;
     }
-    return ''; // 브라우저 기본
+    return '';
   }
 
   function blobToDataURL(blob){
     return new Promise((res,rej)=>{
-      const fr = new FileReader();
-      fr.onload = () => res(fr.result); // data:audio/...;base64,AAAA...
-      fr.onerror = rej;
+      const fr=new FileReader();
+      fr.onload=()=>res(fr.result);
+      fr.onerror=rej;
       fr.readAsDataURL(blob);
     });
   }
 
   async function tryCopy(text){
-    // 1) 최신 API
-    try{
+    try {
       if (navigator.clipboard && window.isSecureContext){
         await navigator.clipboard.writeText(text);
         return true;
       }
-    }catch(e){}
-    // 2) execCommand 폴백
-    try{
-      b64TA.value = text;
+    } catch(e){}
+    try {
+      b64TA.value=text;
       b64TA.select();
       document.execCommand('copy');
       return true;
-    }catch(e){}
+    } catch(e){}
     return false;
   }
 
-  function setStatus(msg){ statusEl.textContent = msg; }
+  function setStatus(msg){ statusEl.textContent=msg; }
 
   async function startRec(){
     if (!navigator.mediaDevices?.getUserMedia){
@@ -112,41 +110,29 @@
       lastName = `recording_${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
       player.src = URL.createObjectURL(blob);
 
-      setStatus('인코딩 중…');
-      const dataURL = await blobToDataURL(blob);            // data:audio/...;base64,AAAA...
-      dataTA.value = dataURL;                               // 백업(본문으로도 가져갈 수 있음)
-      lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);   // 순수 Base64만
+      const dataURL = await blobToDataURL(blob);
+      dataTA.value = dataURL;
+      lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);
       b64TA.value = lastBase64;
-
-      // 클립보드 자동 복사 시도
-      setStatus('클립보드에 복사 중…');
-      const ok = await tryCopy(lastBase64);
-      if (ok){
-        setStatus(`복사 완료! Shortcuts에서 "Get Clipboard → Base64 Decode (File) → Save File"로 저장하세요. (파일명: ${lastName})`);
-      } else {
-        setStatus('자동 복사 실패. "Copy Again"을 눌러 복사하세요.');
-        copyBtn.style.display = 'inline-block';
-      }
-
-      // 타이틀에도 메타 남기기(백업): 제목/본문으로도 Shortcuts에서 읽기 가능
+      doneBtn.disabled = false;
+      setStatus('녹음 완료. Done 버튼을 눌러 복사할 수 있습니다.');
       document.title = `Audio Ready: ${lastName}`;
-      // 버튼/상태 원복
-      recordBtn.textContent = 'Record';
-      mediaRecorder = null;
     };
 
-    // 타이머
     startTs = Date.now();
     tickId = setInterval(()=> timerEl.textContent = fmt(Date.now()-startTs), 250);
     setStatus('녹음 중…');
     mediaRecorder.start(250);
     recordBtn.textContent = 'Stop';
+    doneBtn.disabled = true;
   }
 
   function stopRec(){
     if (!mediaRecorder) return;
     mediaRecorder.stop();
     mediaRecorder.stream.getTracks().forEach(t=>t.stop());
+    recordBtn.textContent = 'Record';
+    setStatus('녹음 종료 중…');
   }
 
   async function onRecordClick(){
@@ -156,30 +142,29 @@
       try { await startRec(); }
       catch(e){
         console.error(e);
-        alert('마이크 권한 또는 녹음 시작에 실패했습니다.\n• HTTPS/localhost인지 확인\n• iOS 설정 > Safari > 마이크: 허용/요청');
-        recordBtn.textContent = 'Record';
-        setStatus('');
+        alert('마이크 권한 또는 녹음 시작 실패.\n• HTTPS/localhost인지 확인\n• 설정 > Safari > 마이크: 허용/요청');
         clearInterval(tickId);
         timerEl.textContent = '00:00';
+        recordBtn.textContent = 'Record';
         mediaRecorder = null;
+        setStatus('');
       }
     }
   }
 
-  async function onCopyAgain(){
-    if (!lastBase64){
-      alert('복사할 데이터가 없습니다. 먼저 녹음하세요.');
-      return;
-    }
+  async function onDoneClick(){
+    if (!lastBase64){ alert('복사할 녹음이 없습니다. 먼저 녹음을 완료하세요.'); return; }
     const ok = await tryCopy(lastBase64);
-    setStatus(ok
-      ? `복사 완료! 파일명: ${lastName}`
-      : '복사 실패. 입력창을 길게 눌러 전체 선택 후 수동 복사하세요.');
+    if (!ok) alert('복사 실패. 텍스트를 직접 복사하세요.');
   }
 
-  // 바인딩
   recordBtn.addEventListener('click', onRecordClick);
-  copyBtn.addEventListener('click', onCopyAgain);
+  doneBtn.addEventListener('click', onDoneClick);
 
-  // 권장 안내
-  if (!(location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1
+  if (!(location.protocol === 'https:' || location.hostname === 'localhost')){
+    console.warn('HTTPS 또는 localhost에서 실행해야 클립보드 복사와 마이크 접근이 작동합니다.');
+  }
+})();
+</script>
+</body>
+</html>
