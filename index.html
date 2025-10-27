@@ -13,12 +13,12 @@
   #timer { min-width:80px; font-variant-numeric: tabular-nums; }
   audio { width:100%; margin-top:12px; }
 
-  /* 전달 텍스트 표시(옵션) */
+  /* (옵션) 전달 텍스트 표시 */
   .incoming-wrap { margin:12px 0 16px; padding:10px 12px; border:1px solid #e5e5ea; border-radius:10px; background:#f7f7f9; }
   .incoming-label { font-size:12px; color:#666; margin-bottom:6px; }
   .incoming-text { white-space:pre-wrap; word-break:break-word; font-size:16px; }
 
-  /* 클립보드 폴백용 숨김 영역 */
+  /* 폴백용 숨김 영역 */
   #b64, #dataurl { position:fixed; bottom:-9999px; left:0; width:1px; height:1px; opacity:0.001; }
 
   /* 녹음 중(Stop)일 때 버튼 빨간색 */
@@ -47,7 +47,7 @@
 
 <script>
 (() => {
-  // ---------- 전달 텍스트 표시 (옵션) ----------
+  // ---------- (옵션) 전달 텍스트 표시 ----------
   function readIncoming() {
     const qs = new URLSearchParams(location.search);
     let v = qs.get('message');
@@ -61,10 +61,8 @@
   }
   const msg = readIncoming();
   if (msg) {
-    const box = document.getElementById('incomingBox');
-    const el  = document.getElementById('incomingText');
-    el.innerText = msg;
-    box.style.display = 'block';
+    incomingText.innerText = msg;
+    incomingBox.style.display = 'block';
   }
 
   // ---------- 녹음 ----------
@@ -109,7 +107,7 @@
   }
 
   async function copyTextRobust(text){
-    // 1) 최신 API
+    // 1) 최신 API (보안 맥락 & 사용자 제스처)
     try{
       if ((location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))
           && navigator.clipboard && window.isSecureContext){
@@ -138,6 +136,16 @@
     throw new Error('Copy failed');
   }
 
+  function waitForStop(rec){
+    return new Promise(resolve => {
+      const prev = rec.onstop;
+      rec.onstop = (ev) => {
+        try { prev && prev(ev); } catch {}
+        resolve();
+      };
+    });
+  }
+
   async function startRec(){
     if (!navigator.mediaDevices?.getUserMedia){
       alert('이 환경에서는 마이크 접근을 지원하지 않습니다.');
@@ -149,54 +157,71 @@
     mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
 
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
-    mediaRecorder.onstop = async () => {
-      clearInterval(tickId);
-      timerEl.textContent = '00:00';
-
-      const type = mediaRecorder.mimeType || 'audio/mp4';
-      const blob = new Blob(chunks, { type });
-      lastMime = type;
-      const ext  = type.includes('mp4') ? 'm4a' : (type.includes('webm') ? 'webm' : 'm4a');
-      lastName = `recording_${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
-      player.src = URL.createObjectURL(blob);
-
-      const dataURL = await blobToDataURL(blob);
-      dataTA.value = dataURL;
-      lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);
-      b64TA.value = lastBase64;
-      document.title = `Audio Ready: ${lastName}`;
-
-      // ✅ 자동 닫기/이동 없이, 클립보드에만 복사
-      try {
-        await copyTextRobust(dataURL);
-        // 여기서 창은 닫지 않습니다. (사용자가 수동으로 닫기)
-      } catch (e) {
-        alert('클립보드 복사에 실패했습니다. 페이지에서 직접 복사하세요.');
-      }
-    };
 
     startTs = Date.now();
+    clearInterval(tickId);
     tickId = setInterval(()=> timerEl.textContent = fmt(Date.now()-startTs), 250);
+
     mediaRecorder.start(250);
 
-    // 버튼 상태를 녹음 중(빨간색)으로 전환, 텍스트 카운트다운은 Ready → Go (각 0.8s)
+    // 버튼을 녹음 중(빨강)으로 전환 & 카운트다운(2→1, 각 0.8s) 표시
     recordBtn.classList.add('danger');
     showCountdownWhileRecording();
   }
 
-  function stopRec(){
+  // Stop을 누른 "사용자 제스처" 안에서 마지막 청크 수집 → DataURL 생성 → 즉시 복사
+  async function stopAndCopyInClick(){
     if (!mediaRecorder) return;
-    countdownToken++; // 진행 중 카운트다운 취소
+    countdownToken++; // 카운트다운 취소
+
+    // 마지막 데이터 강제 플러시 (일부 환경에서 유용)
+    if (typeof mediaRecorder.requestData === 'function') {
+      try { mediaRecorder.requestData(); } catch {}
+    }
+    const stopped = waitForStop(mediaRecorder);
     mediaRecorder.stop();
-    mediaRecorder.stream.getTracks().forEach(t=>t.stop());
+    try { mediaRecorder.stream.getTracks().forEach(t=>t.stop()); } catch {}
+
+    await stopped; // onstop 완료 대기
+
+    clearInterval(tickId);
+    timerEl.textContent = '00:00';
+
+    const type = (mediaRecorder && mediaRecorder.mimeType) || 'audio/mp4';
+    lastMime = type;
+
+    const blob = new Blob(chunks, { type });
+    chunks = []; // reset
+
+    try { player.src = URL.createObjectURL(blob); } catch {}
+
+    const dataURL = await blobToDataURL(blob);
+    dataTA.value = dataURL;
+    lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);
+    b64TA.value = lastBase64;
+
+    const ext  = type.includes('mp4') ? 'm4a' : (type.includes('webm') ? 'webm' : 'm4a');
+    lastName = `recording_${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
+    document.title = `Audio Ready: ${lastName}`;
+
+    // ✅ 클릭 핸들러 체인 내에서 즉시 복사 (사용자 제스처 유지)
+    await copyTextRobust(dataURL);
+
+    // 버튼 UI 복구
+    recordBtn.textContent = 'Record';
+    recordBtn.classList.remove('danger');
+  }
+
+  function stopRecUIOnly(){
+    // UI만 즉시 바꾸고, 실질 처리는 stopAndCopyInClick에서
     recordBtn.textContent = 'Record';
     recordBtn.classList.remove('danger');
   }
 
   async function showCountdownWhileRecording(){
     const myToken = ++countdownToken;
-    const steps = ['Ready','Go'];      // ◀ Ready → Go
-    const stepDelay = 800;             // ◀ 각 0.8초
+    const steps = ['2','1'];   // ◀ 2 → 1
+    const stepDelay = 800;     // ◀ 각 0.8초
 
     for (const label of steps){
       if (myToken !== countdownToken) return;
@@ -210,25 +235,32 @@
   }
 
   async function onRecordClick(){
-    if (mediaRecorder && mediaRecorder.state === 'recording'){
-      // Stop: 정지하면 onstop에서 클립보드로 복사 (창은 닫지 않음)
-      stopRec();
-    } else {
-      try {
+    try {
+      if (mediaRecorder && mediaRecorder.state === 'recording'){
+        // Stop: 클릭 핸들러 안에서 바로 대기-생성-복사
+        recordBtn.disabled = true;
+        await stopAndCopyInClick();
+        recordBtn.disabled = false;
+      } else {
         await startRec();   // 즉시 녹음 시작
-      } catch(e){
-        console.error(e);
-        alert('마이크 권한 또는 녹음 시작 실패.');
-        clearInterval(tickId);
-        timerEl.textContent = '00:00';
-        recordBtn.textContent = 'Record';
-        recordBtn.classList.remove('danger');
-        mediaRecorder = null;
       }
+    } catch(e){
+      console.error(e);
+      alert('마이크/클립보드 처리 중 오류가 발생했습니다.');
+      // UI 복구
+      clearInterval(tickId);
+      timerEl.textContent = '00:00';
+      stopRecUIOnly();
+      mediaRecorder = null;
     }
   }
 
   recordBtn.addEventListener('click', onRecordClick);
+
+  // 참고: HTTPS/localhost 권장 (클립보드 최신 API 동작 안정성)
+  if (!(location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))) {
+    console.warn('HTTPS 또는 localhost에서 실행해야 클립보드/마이크가 안정적으로 동작합니다.');
+  }
 })();
 </script>
 </body>
