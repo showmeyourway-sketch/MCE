@@ -168,8 +168,8 @@
     const mime = pickMime();
     // 64kbps로 용량 절감
     const options = mime
-      ? { mimeType: mime, audioBitsPerSecond: 32000 }
-      : { audioBitsPerSecond: 32000 };
+      ? { mimeType: mime, audioBitsPerSecond: 48000 }
+      : { audioBitsPerSecond: 48000 };
     mediaRecorder = new MediaRecorder(stream, options);
 
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
