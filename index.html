@@ -185,12 +185,11 @@
 
   async function showCountdownWhileRecording(){
     const myToken = ++countdownToken;
-    for (const n of [2,1]){  // 카운트다운 2 → 1
-      if (myToken !== countdownToken) return;
-      if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
-      recordBtn.textContent = String(n);
-      await sleep(1000);
-    }
+    // Ready 하나만 표시하고 1초 기다림
+    if (myToken !== countdownToken) return;
+    if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
+    recordBtn.textContent = 'Ready';
+    await sleep(1000);
     if (myToken === countdownToken && mediaRecorder && mediaRecorder.state === 'recording'){
       recordBtn.textContent = 'Stop';
     }
