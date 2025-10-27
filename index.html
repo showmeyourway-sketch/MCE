@@ -12,7 +12,6 @@
   button[disabled]{ opacity:.5; }
   #timer { min-width:80px; font-variant-numeric: tabular-nums; }
   audio { width:100%; margin-top:12px; }
-  /* execCommand 폴백이 실제 선택을 요구하는 iOS용: 화면 안쪽 배치 */
   #b64, #dataurl { position:fixed; bottom:-9999px; left:0; width:1px; height:1px; opacity:0.001; }
 
   /* 녹음 중(Stop)일 때 버튼 빨간색 */
@@ -28,7 +27,6 @@
   </div>
   <audio id="player" controls></audio>
 
-  <!-- 백업/폴백 -->
   <textarea id="b64" readonly></textarea>
   <textarea id="dataurl" readonly></textarea>
 
@@ -46,14 +44,14 @@
 
   let mediaRecorder=null, chunks=[], startTs=0, tickId=0;
   let lastBase64='', lastName='', lastMime='';
-  let countdownToken = 0; // 카운트다운 취소용 토큰
+  let countdownToken = 0;
 
   const fmt = ms => { const s=Math.floor(ms/1000), m=String(Math.floor(s/60)).padStart(2,'0'), ss=String(s%60).padStart(2,'0'); return `${m}:${ss}`; };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   function pickMime(){
     const cands = [
-      'audio/mp4;codecs=mp4a.40.2', // m4a 우선 (Safari 친화)
+      'audio/mp4;codecs=mp4a.40.2',
       'audio/mp4',
       'audio/webm;codecs=opus',
       'audio/webm'
@@ -67,7 +65,7 @@
   function blobToDataURL(blob){
     return new Promise((res,rej)=>{
       const fr=new FileReader();
-      fr.onload = ()=>res(fr.result); // data:audio/...;base64,AAAA...
+      fr.onload = ()=>res(fr.result);
       fr.onerror= rej;
       fr.readAsDataURL(blob);
     });
@@ -102,7 +100,7 @@
 
   async function startRec(){
     if (!navigator.mediaDevices?.getUserMedia){
-      alert('이 환경에서는 마이크 접근을 지원하지 않습니다. HTTPS 또는 localhost에서 실행하세요.');
+      alert('이 환경에서는 마이크 접근을 지원하지 않습니다.');
       return;
     }
     const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
@@ -114,19 +112,16 @@
     mediaRecorder.onstop = async () => {
       clearInterval(tickId);
       timerEl.textContent = '00:00';
-
       const type = mediaRecorder.mimeType || 'audio/mp4';
       const blob = new Blob(chunks, { type });
       lastMime = type;
       const ext  = type.includes('mp4') ? 'm4a' : (type.includes('webm') ? 'webm' : 'm4a');
       lastName = `recording_${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
       player.src = URL.createObjectURL(blob);
-
       const dataURL = await blobToDataURL(blob);
       dataTA.value = dataURL;
       lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);
       b64TA.value = lastBase64;
-
       document.title = `Audio Ready: ${lastName}`;
       doneBtn.disabled = false;
     };
@@ -134,33 +129,26 @@
     startTs = Date.now();
     tickId = setInterval(()=> timerEl.textContent = fmt(Date.now()-startTs), 250);
     mediaRecorder.start(250);
-
-    // 녹음 시작 후 버튼을 Stop(빨간색) 상태로
     recordBtn.classList.add('danger');
   }
 
   function stopRec(){
     if (!mediaRecorder) return;
-    // 카운트다운 중이면 취소
     countdownToken++;
     mediaRecorder.stop();
     mediaRecorder.stream.getTracks().forEach(t=>t.stop());
-    // Stop 상태에서 버튼 복귀
     recordBtn.textContent = 'Record';
     recordBtn.classList.remove('danger');
   }
 
   async function showCountdownWhileRecording(){
-    const myToken = ++countdownToken; // 새 카운트 시작
-    for (const n of [3,2,1]){
-      // 이미 다른 이벤트(Stop 등)로 토큰이 바뀌었으면 중단
+    const myToken = ++countdownToken;
+    for (const n of [2,1]){  // 🔹 여기서 3,2,1 → 2,1로 변경
       if (myToken !== countdownToken) return;
-      // 아직 녹음 중인지 확인
       if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
       recordBtn.textContent = String(n);
       await sleep(1000);
     }
-    // 카운트 완료 후에도 여전히 녹음 중이면 Stop 표기
     if (myToken === countdownToken && mediaRecorder && mediaRecorder.state === 'recording'){
       recordBtn.textContent = 'Stop';
     }
@@ -168,17 +156,14 @@
 
   async function onRecordClick(){
     if (mediaRecorder && mediaRecorder.state === 'recording'){
-      // 녹음 중: Stop
       stopRec();
     } else {
       try {
-        // 1) 즉시 녹음 시작
         await startRec();
-        // 2) 버튼은 빨간색으로 두고, 텍스트는 3→2→1 카운트
         showCountdownWhileRecording();
       } catch(e){
         console.error(e);
-        alert('마이크 권한 또는 녹음 시작 실패.\n• HTTPS/localhost인지 확인\n• 설정 > Safari > 마이크: 허용/요청');
+        alert('마이크 권한 또는 녹음 시작 실패.');
         clearInterval(tickId);
         timerEl.textContent = '00:00';
         recordBtn.textContent = 'Record';
@@ -190,24 +175,20 @@
 
   async function onDoneClick(){
     if (!lastBase64){
-      alert('복사할 녹음이 없습니다. 먼저 녹음을 완료하세요.');
+      alert('복사할 녹음이 없습니다.');
       return;
     }
     try {
       await copyTextRobust(dataTA.value);
       const url = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME);
       location.href = url;
-    } catch (e) {
-      alert('복사에 실패했습니다. 페이지 본문에서 직접 복사하세요.');
+    } catch {
+      alert('복사 실패');
     }
   }
 
   recordBtn.addEventListener('click', onRecordClick);
   doneBtn.addEventListener('click', onDoneClick);
-
-  if (!(location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))) {
-    console.warn('HTTPS 또는 localhost에서 실행해야 마이크/클립보드가 안정적으로 동작합니다.');
-  }
 })();
 </script>
 </body>
