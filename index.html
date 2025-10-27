@@ -3,22 +3,25 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-<title>Record → Auto Copy (Optimized)</title>
+<title>Record → Auto Copy (Force M4A)</title>
 <style>
   body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto; padding:20px; }
   h1 { font-size:18px; margin:0 0 10px; }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:10px 0; }
   button { padding:10px 14px; border:0; border-radius:10px; background:#007aff; color:#fff; font-size:16px; }
   #timer { min-width:80px; font-variant-numeric: tabular-nums; }
+  /* execCommand 폴백용: 화면 안쪽 배치(실제 선택 가능) */
   #b64, #dataurl { position:fixed; bottom:-9999px; left:0; width:1px; height:1px; opacity:0.001; }
 </style>
 </head>
 <body>
-  <h1>오디오 녹음</h1>
+  <h1>오디오 녹음 (m4a 강제)</h1>
   <div class="row">
     <button id="recordBtn">Record</button>
     <span id="timer">00:00</span>
   </div>
+
+  <!-- 폴백/백업 -->
   <textarea id="b64" readonly></textarea>
   <textarea id="dataurl" readonly></textarea>
 
@@ -31,24 +34,21 @@
 
   let mediaRecorder=null, chunks=[], startTs=0, tickId=0;
 
-  const fmt = ms => {
-    const s=Math.floor(ms/1000);
-    const m=String(Math.floor(s/60)).padStart(2,'0');
-    const ss=String(s%60).padStart(2,'0');
-    return `${m}:${ss}`;
-  };
+  const fmt = ms => { const s=Math.floor(ms/1000), m=String(Math.floor(s/60)).padStart(2,'0'), ss=String(s%60).padStart(2,'0'); return `${m}:${ss}`; };
 
-  function pickMime(){
-    const cands=['audio/mp4;codecs=mp4a.40.2','audio/mp4','audio/webm;codecs=opus','audio/webm'];
-    for (const m of cands)
-      if (window.MediaRecorder?.isTypeSupported?.(m)) return m;
+  function pickMimeForceM4A(){
+    const prefer = 'audio/mp4;codecs=mp4a.40.2';   // ✅ m4a(AAC) 강제
+    const alt    = 'audio/mp4';
+    if (window.MediaRecorder?.isTypeSupported?.(prefer)) return prefer;
+    if (window.MediaRecorder?.isTypeSupported?.(alt))    return alt;
+    // 마지막 폴백: 브라우저 기본 (가능하면 iOS Safari에선 위 둘 중 하나가 됨)
     return '';
   }
 
   function blobToDataURL(blob){
     return new Promise((res,rej)=>{
       const fr=new FileReader();
-      fr.onload=()=>res(fr.result);
+      fr.onload=()=>res(fr.result);           // data:audio/...;base64,AAAA...
       fr.onerror=rej;
       fr.readAsDataURL(blob);
     });
@@ -58,27 +58,18 @@
     try{
       if ((location.protocol==='https:'||['localhost','127.0.0.1'].includes(location.hostname))
           && navigator.clipboard && window.isSecureContext){
-        await navigator.clipboard.writeText(text);
-        return true;
+        await navigator.clipboard.writeText(text); return true;
       }
     }catch(e){}
     try{
       const ta=document.createElement('textarea');
-      ta.value=text;
-      ta.setAttribute('readonly','');
-      ta.style.position='fixed';
-      ta.style.left='0';
-      ta.style.bottom='0';
-      ta.style.opacity='0.001';
-      document.body.appendChild(ta);
-      ta.focus(); ta.select(); ta.setSelectionRange(0, ta.value.length);
-      const ok=document.execCommand('copy');
-      document.body.removeChild(ta);
+      ta.value=text; ta.setAttribute('readonly','');
+      ta.style.position='fixed'; ta.style.left='0'; ta.style.bottom='0'; ta.style.opacity='0.001';
+      document.body.appendChild(ta); ta.focus(); ta.select(); ta.setSelectionRange(0, ta.value.length);
+      const ok=document.execCommand('copy'); document.body.removeChild(ta);
       if (ok) return true;
     }catch(e){}
-    b64TA.value=text;
-    b64TA.focus(); b64TA.select();
-    b64TA.setSelectionRange(0,b64TA.value.length);
+    b64TA.value=text; b64TA.focus(); b64TA.select(); b64TA.setSelectionRange(0,b64TA.value.length);
     return document.execCommand('copy');
   }
 
@@ -88,66 +79,63 @@
       return;
     }
 
+    // 권장 입력 옵션: 에코/노이즈 억제
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: false
-      }
+      audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:false }
     });
 
-    // 🎧 Safari 안정화 (앞부분 잘림 방지)
-    await new Promise(r => setTimeout(r, 500));
+    // 앞부분 잘림 방지: 장치 안정화 대기
+    await new Promise(r=>setTimeout(r,500));
 
     chunks=[];
-    const mime=pickMime();
-    mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+    const forced = pickMimeForceM4A(); // ✅ m4a 강제
+    mediaRecorder = forced ? new MediaRecorder(stream, { mimeType: forced })
+                           : new MediaRecorder(stream);
 
-    mediaRecorder.ondataavailable = e => {
-      if (e.data && e.data.size) chunks.push(e.data);
-    };
+    mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
 
     mediaRecorder.onstop = async () => {
-      clearInterval(tickId);
-      timerEl.textContent = '00:00';
-      const type = mediaRecorder.mimeType || 'audio/mp4';
+      clearInterval(tickId); timerEl.textContent='00:00';
+
+      const type = mediaRecorder.mimeType || 'audio/mp4'; // 기대: audio/mp4
       const blob = new Blob(chunks, { type });
 
-      // ✅ player는 녹음 후에만 생성 (루프백 방지)
+      // ✅ 재생기는 녹음 이후에만 생성(루프백 방지)
       const player = document.createElement('audio');
       player.controls = true;
       player.src = URL.createObjectURL(blob);
-      player.style.display = 'block';
-      player.style.marginTop = '12px';
+      player.style.display='block';
+      player.style.marginTop='12px';
       document.body.appendChild(player);
 
-      // ✅ 자동 클립보드 복사
+      // ✅ data URL 전체를 자동 복사 (Shortcuts: Get Contents of URL로 디코드)
       const dataURL = await blobToDataURL(blob);
-      dataTA.value = dataURL;
+      dataTA.value = dataURL;                 // 예: data:audio/mp4;base64,AAAA...
       await copyTextRobust(dataURL);
 
-      // ✅ Wait to Return: Off → 자동으로 단축어 다음 액션 실행
+      // 제목에 포맷 힌트(선택): 필요 시 단축어에서 읽어 확장자 결정 가능
+      document.title = `Audio Ready: ${type.includes('mp4') ? 'm4a' : 'fallback'}`;
     };
 
     startTs = Date.now();
-    tickId = setInterval(()=> timerEl.textContent = fmt(Date.now() - startTs), 250);
+    tickId = setInterval(()=> timerEl.textContent = fmt(Date.now()-startTs), 250);
     mediaRecorder.start(250);
-    recordBtn.textContent = 'Stop';
+    recordBtn.textContent='Stop';
   }
 
   function stopRec(){
-    if (!mediaRecorder) return;
+    if(!mediaRecorder)return;
     mediaRecorder.stop();
-    mediaRecorder.stream.getTracks().forEach(t => t.stop());
-    recordBtn.textContent = 'Record';
+    mediaRecorder.stream.getTracks().forEach(t=>t.stop());
+    recordBtn.textContent='Record';
   }
 
-  recordBtn.addEventListener('click', () => {
-    if (mediaRecorder && mediaRecorder.state === 'recording') stopRec();
+  recordBtn.addEventListener('click', ()=>{
+    if(mediaRecorder && mediaRecorder.state==='recording') stopRec();
     else startRec();
   });
 
-  if (!(location.protocol==='https:' || ['localhost','127.0.0.1'].includes(location.hostname))) {
+  if(!(location.protocol==='https:'||['localhost','127.0.0.1'].includes(location.hostname))){
     console.warn('HTTPS 또는 localhost에서 실행해야 마이크/클립보드가 안정적으로 동작합니다.');
   }
 })();
