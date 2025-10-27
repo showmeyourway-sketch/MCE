@@ -73,7 +73,6 @@
   const dataTA    = document.getElementById('dataurl');
 
   let mediaRecorder=null, chunks=[], startTs=0, tickId=0;
-  let lastBase64='', lastName='', lastMime='';
   let countdownToken = 0;
 
   const fmt = ms => {
@@ -112,7 +111,7 @@
       if ((location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))
           && navigator.clipboard && window.isSecureContext){
         await navigator.clipboard.writeText(text);
-        return;
+        return true;
       }
     }catch(e){}
     // 2) execCommand 폴백
@@ -126,24 +125,22 @@
       ta.focus(); ta.select(); ta.setSelectionRange(0, ta.value.length);
       const ok = document.execCommand('copy');
       document.body.removeChild(ta);
-      if (ok) return;
+      if (ok) return true;
     }catch(e){}
     // 3) 화면 내 숨김 textarea
-    b64TA.value = text;
-    b64TA.focus(); b64TA.select(); b64TA.setSelectionRange(0, b64TA.value.length);
-    const ok3 = document.execCommand('copy');
-    if (ok3) return;
-    throw new Error('Copy failed');
+    try{
+      b64TA.value = text;
+      b64TA.focus(); b64TA.select(); b64TA.setSelectionRange(0, b64TA.value.length);
+      const ok3 = document.execCommand('copy');
+      if (ok3) return true;
+    }catch(e){}
+    return false;
   }
 
-  function waitForStop(rec){
-    return new Promise(resolve => {
-      const prev = rec.onstop;
-      rec.onstop = (ev) => {
-        try { prev && prev(ev); } catch {}
-        resolve();
-      };
-    });
+  function startRecTick(){
+    startTs = Date.now();
+    clearInterval(tickId);
+    tickId = setInterval(()=> timerEl.textContent = fmt(Date.now()-startTs), 250);
   }
 
   async function startRec(){
@@ -158,10 +155,7 @@
 
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
 
-    startTs = Date.now();
-    clearInterval(tickId);
-    tickId = setInterval(()=> timerEl.textContent = fmt(Date.now()-startTs), 250);
-
+    startRecTick();
     mediaRecorder.start(250);
 
     // 버튼을 녹음 중(빨강)으로 전환 & 카운트다운(2→1, 각 0.8s) 표시
@@ -169,59 +163,79 @@
     showCountdownWhileRecording();
   }
 
-  // Stop을 누른 "사용자 제스처" 안에서 마지막 청크 수집 → DataURL 생성 → 즉시 복사
+  // Stop 클릭 핸들러 안에서: onstop 대기 + 타임아웃 보강 → DataURL → 클립보드
   async function stopAndCopyInClick(){
-    if (!mediaRecorder) return;
+    if (!mediaRecorder) throw new Error('NO_RECORDER');
+
     countdownToken++; // 카운트다운 취소
 
-    // 마지막 데이터 강제 플러시 (일부 환경에서 유용)
-    if (typeof mediaRecorder.requestData === 'function') {
-      try { mediaRecorder.requestData(); } catch {}
-    }
-    const stopped = waitForStop(mediaRecorder);
-    mediaRecorder.stop();
-    try { mediaRecorder.stream.getTracks().forEach(t=>t.stop()); } catch {}
+    // 1) 마지막 데이터 강제 플러시 (가능한 경우)
+    try { mediaRecorder.requestData && mediaRecorder.requestData(); } catch {}
 
-    await stopped; // onstop 완료 대기
+    // 2) onstop 대기 + 타임아웃(1.5초) 레이스
+    const stopped = new Promise((resolve) => {
+      const prev = mediaRecorder.onstop;
+      mediaRecorder.onstop = (ev) => {
+        try { prev && prev(ev); } catch {}
+        resolve('onstop');
+      };
+    });
+    const timeout = new Promise((resolve) => setTimeout(()=>resolve('timeout'), 1500));
 
+    // 3) stop 호출
+    try { mediaRecorder.stop(); } catch (e) { /* 이미 inactive일 수도 있음 */ }
+    try { mediaRecorder.stream && mediaRecorder.stream.getTracks().forEach(t=>t.stop()); } catch {}
+
+    const which = await Promise.race([stopped, timeout]);
+
+    // 4) 타이머 정리
     clearInterval(tickId);
     timerEl.textContent = '00:00';
 
+    // 5) Blob 생성 (청크가 비어있을 수도 있으니 방어)
     const type = (mediaRecorder && mediaRecorder.mimeType) || 'audio/mp4';
-    lastMime = type;
-
-    const blob = new Blob(chunks, { type });
+    const blob = new Blob(chunks || [], { type });
     chunks = []; // reset
 
     try { player.src = URL.createObjectURL(blob); } catch {}
 
-    const dataURL = await blobToDataURL(blob);
+    // 6) Data URL 생성
+    let dataURL = '';
+    try {
+      dataURL = await blobToDataURL(blob);
+    } catch (e) {
+      alert('오디오 데이터 변환에 실패했습니다. (E-blobToDataURL)');
+      throw e;
+    }
+
     dataTA.value = dataURL;
-    lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);
-    b64TA.value = lastBase64;
 
-    const ext  = type.includes('mp4') ? 'm4a' : (type.includes('webm') ? 'webm' : 'm4a');
-    lastName = `recording_${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
-    document.title = `Audio Ready: ${lastName}`;
+    // 7) 즉시 클립보드 복사 (사용자 제스처 컨텍스트)
+    const copied = await copyTextRobust(dataURL);
+    if (!copied) {
+      alert('클립보드 복사에 실패했습니다. (E-clipboard)\n페이지에서 직접 복사해 주세요.');
+      throw new Error('CLIPBOARD_FAILED');
+    }
 
-    // ✅ 클릭 핸들러 체인 내에서 즉시 복사 (사용자 제스처 유지)
-    await copyTextRobust(dataURL);
-
-    // 버튼 UI 복구
+    // 8) 버튼 UI 복구
     recordBtn.textContent = 'Record';
     recordBtn.classList.remove('danger');
+
+    // (디버그용) 어떤 경로였는지 기록
+    if (which === 'timeout') {
+      console.warn('onstop timeout fallback used.');
+    }
   }
 
   function stopRecUIOnly(){
-    // UI만 즉시 바꾸고, 실질 처리는 stopAndCopyInClick에서
     recordBtn.textContent = 'Record';
     recordBtn.classList.remove('danger');
   }
 
   async function showCountdownWhileRecording(){
     const myToken = ++countdownToken;
-    const steps = ['2','1'];   // ◀ 2 → 1
-    const stepDelay = 800;     // ◀ 각 0.8초
+    const steps = ['2','1'];   // 2 → 1
+    const stepDelay = 800;     // 각 0.8초
 
     for (const label of steps){
       if (myToken !== countdownToken) return;
@@ -237,7 +251,6 @@
   async function onRecordClick(){
     try {
       if (mediaRecorder && mediaRecorder.state === 'recording'){
-        // Stop: 클릭 핸들러 안에서 바로 대기-생성-복사
         recordBtn.disabled = true;
         await stopAndCopyInClick();
         recordBtn.disabled = false;
@@ -246,11 +259,12 @@
       }
     } catch(e){
       console.error(e);
-      alert('마이크/클립보드 처리 중 오류가 발생했습니다.');
+      alert('마이크/클립보드 처리 중 오류가 발생했습니다. (E-global)');
       // UI 복구
       clearInterval(tickId);
       timerEl.textContent = '00:00';
       stopRecUIOnly();
+      // 안전상 recorder 초기화
       mediaRecorder = null;
     }
   }
