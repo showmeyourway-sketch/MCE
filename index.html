@@ -85,7 +85,7 @@
 
   function pickMime(){
     const cands = [
-      'audio/mp4;codecs=mp4a.40.2',
+      'audio/mp4;codecs=mp4a.40.2', // m4a 선호
       'audio/mp4',
       'audio/webm;codecs=opus',
       'audio/webm'
@@ -105,35 +105,56 @@
     });
   }
 
-  async function copyTextRobust(text){
-    // 1) 최신 API (보안 맥락 & 사용자 제스처)
+  // === 복사 유틸(강화) ===
+  async function robustCopy(text){
+    // 너무 긴 문자열이면 경고(그래도 시도)
+    if (text && text.length > 1_000_000) {
+      console.warn('Data URL is very long; iOS may reject clipboard write.');
+      // 사용자에게도 애매하면 알려주고 계속
+      // alert('녹음 길이가 길어 클립보드로 보내기 어려울 수 있습니다. (그래도 시도합니다)');
+    }
+
+    // A) ClipboardItem 경로(텍스트 Blob) — 일부 환경에서 성공률↑
     try{
-      if ((location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))
-          && navigator.clipboard && window.isSecureContext){
+      if (navigator.clipboard && window.isSecureContext && typeof ClipboardItem !== 'undefined') {
+        const item = new ClipboardItem({ 'text/plain': new Blob([text], { type: 'text/plain' }) });
+        await navigator.clipboard.write([item]);
+        return true;
+      }
+    }catch(e){ /* continue */ }
+
+    // B) writeText
+    try{
+      if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(text);
         return true;
       }
-    }catch(e){}
-    // 2) execCommand 폴백
+    }catch(e){ /* continue */ }
+
+    // C) execCommand 폴백(임시 textarea)
     try{
       const ta = document.createElement('textarea');
       ta.value = text;
       ta.setAttribute('readonly','');
       ta.style.position = 'fixed';
-      ta.style.left = '0'; ta.style.bottom = '0'; ta.style.opacity = '0.001';
+      ta.style.left = '0';
+      ta.style.bottom = '0';
+      ta.style.opacity = '0.001';
       document.body.appendChild(ta);
       ta.focus(); ta.select(); ta.setSelectionRange(0, ta.value.length);
       const ok = document.execCommand('copy');
       document.body.removeChild(ta);
       if (ok) return true;
-    }catch(e){}
-    // 3) 화면 내 숨김 textarea
+    }catch(e){ /* continue */ }
+
+    // D) 폴백 textarea
     try{
       b64TA.value = text;
       b64TA.focus(); b64TA.select(); b64TA.setSelectionRange(0, b64TA.value.length);
       const ok3 = document.execCommand('copy');
       if (ok3) return true;
     }catch(e){}
+
     return false;
   }
 
@@ -163,16 +184,16 @@
     showCountdownWhileRecording();
   }
 
-  // Stop 클릭 핸들러 안에서: onstop 대기 + 타임아웃 보강 → DataURL → 클립보드
+  // Stop 클릭 핸들러 안에서: onstop 대기 + 타임아웃 → DataURL → 클립보드
   async function stopAndCopyInClick(){
     if (!mediaRecorder) throw new Error('NO_RECORDER');
 
     countdownToken++; // 카운트다운 취소
 
-    // 1) 마지막 데이터 강제 플러시 (가능한 경우)
+    // 마지막 데이터 강제 플러시
     try { mediaRecorder.requestData && mediaRecorder.requestData(); } catch {}
 
-    // 2) onstop 대기 + 타임아웃(1.5초) 레이스
+    // onstop 대기 + 타임아웃(1.5s)
     const stopped = new Promise((resolve) => {
       const prev = mediaRecorder.onstop;
       mediaRecorder.onstop = (ev) => {
@@ -182,49 +203,33 @@
     });
     const timeout = new Promise((resolve) => setTimeout(()=>resolve('timeout'), 1500));
 
-    // 3) stop 호출
-    try { mediaRecorder.stop(); } catch (e) { /* 이미 inactive일 수도 있음 */ }
+    try { mediaRecorder.stop(); } catch (e) {}
     try { mediaRecorder.stream && mediaRecorder.stream.getTracks().forEach(t=>t.stop()); } catch {}
 
-    const which = await Promise.race([stopped, timeout]);
+    await Promise.race([stopped, timeout]);
 
-    // 4) 타이머 정리
     clearInterval(tickId);
     timerEl.textContent = '00:00';
 
-    // 5) Blob 생성 (청크가 비어있을 수도 있으니 방어)
     const type = (mediaRecorder && mediaRecorder.mimeType) || 'audio/mp4';
     const blob = new Blob(chunks || [], { type });
-    chunks = []; // reset
+    chunks = [];
 
     try { player.src = URL.createObjectURL(blob); } catch {}
 
-    // 6) Data URL 생성
-    let dataURL = '';
-    try {
-      dataURL = await blobToDataURL(blob);
-    } catch (e) {
-      alert('오디오 데이터 변환에 실패했습니다. (E-blobToDataURL)');
-      throw e;
-    }
-
+    const dataURL = await blobToDataURL(blob);
     dataTA.value = dataURL;
 
-    // 7) 즉시 클립보드 복사 (사용자 제스처 컨텍스트)
-    const copied = await copyTextRobust(dataURL);
-    if (!copied) {
-      alert('클립보드 복사에 실패했습니다. (E-clipboard)\n페이지에서 직접 복사해 주세요.');
+    // ✅ 클릭 핸들러 체인 내에서 즉시 복사 시도 (강화된 robustCopy)
+    const ok = await robustCopy(dataURL);
+    if (!ok) {
+      alert('클립보드 복사에 실패했습니다. (E-clipboard)\n녹음 길이를 줄여 보거나, 페이지에서 직접 복사해 주세요.');
       throw new Error('CLIPBOARD_FAILED');
     }
 
-    // 8) 버튼 UI 복구
+    // 버튼 UI 복구
     recordBtn.textContent = 'Record';
     recordBtn.classList.remove('danger');
-
-    // (디버그용) 어떤 경로였는지 기록
-    if (which === 'timeout') {
-      console.warn('onstop timeout fallback used.');
-    }
   }
 
   function stopRecUIOnly(){
@@ -236,7 +241,6 @@
     const myToken = ++countdownToken;
     const steps = ['2','1'];   // 2 → 1
     const stepDelay = 800;     // 각 0.8초
-
     for (const label of steps){
       if (myToken !== countdownToken) return;
       if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
@@ -264,14 +268,13 @@
       clearInterval(tickId);
       timerEl.textContent = '00:00';
       stopRecUIOnly();
-      // 안전상 recorder 초기화
       mediaRecorder = null;
     }
   }
 
   recordBtn.addEventListener('click', onRecordClick);
 
-  // 참고: HTTPS/localhost 권장 (클립보드 최신 API 동작 안정성)
+  // HTTPS/localhost 권장 (클립보드 최신 API 동작 안정성)
   if (!(location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))) {
     console.warn('HTTPS 또는 localhost에서 실행해야 클립보드/마이크가 안정적으로 동작합니다.');
   }
