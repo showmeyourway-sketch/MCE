@@ -145,7 +145,11 @@
     const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
     chunks = [];
     const mime = pickMime();
-    mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+    // ↓ 비트레이트를 64kbps로 설정
+    const options = mime
+      ? { mimeType: mime, audioBitsPerSecond: 64000 }
+      : { audioBitsPerSecond: 64000 };
+    mediaRecorder = new MediaRecorder(stream, options);
 
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
     mediaRecorder.onstop = async () => {
