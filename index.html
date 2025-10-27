@@ -14,10 +14,6 @@
   audio { width:100%; margin-top:12px; }
   /* execCommand 폴백이 실제 선택을 요구하는 iOS용: 화면 안쪽 배치 */
   #b64, #dataurl { position:fixed; bottom:-9999px; left:0; width:1px; height:1px; opacity:0.001; }
-
-  /* ▼ VU 미터 추가 스타일 */
-  .meter-wrap { margin-top:8px; height:16px; border-radius:999px; background:#f2f2f7; border:1px solid #e5e5ea; overflow:hidden; }
-  .meter-bar  { height:100%; width:0%; background:linear-gradient(90deg,#34c759,#ffcc00,#ff3b30); transition:width .08s linear; }
 </style>
 </head>
 <body>
@@ -27,12 +23,6 @@
     <button id="doneBtn" disabled>Done</button>
     <span id="timer">00:00</span>
   </div>
-
-  <!-- ▼ VU 미터 영역 추가 -->
-  <div class="meter-wrap" aria-label="VU meter">
-    <div class="meter-bar" id="meterBar"></div>
-  </div>
-
   <audio id="player" controls></audio>
 
   <!-- 백업/폴백 -->
@@ -50,13 +40,9 @@
   const player    = document.getElementById('player');
   const b64TA     = document.getElementById('b64');
   const dataTA    = document.getElementById('dataurl');
-  const meterBar  = document.getElementById('meterBar'); // VU
 
   let mediaRecorder=null, chunks=[], startTs=0, tickId=0;
   let lastBase64='', lastName='', lastMime='';
-
-  // ▼ VU 관련 상태
-  let streamRef=null, audioCtx=null, analyser=null, srcNode=null, rafId=0;
 
   const fmt = ms => { const s=Math.floor(ms/1000), m=String(Math.floor(s/60)).padStart(2,'0'), ss=String(s%60).padStart(2,'0'); return `${m}:${ss}`; };
 
@@ -115,53 +101,12 @@
     throw new Error('Copy failed');
   }
 
-  // ▼ VU 루프
-  function startVU() {
-    if (!analyser) return;
-    const buf = new Uint8Array(analyser.fftSize);
-    const floor = -60; // dBFS 바닥
-    cancelAnimationFrame(rafId);
-    const tick = () => {
-      analyser.getByteTimeDomainData(buf);
-      let sum=0;
-      for (let i=0;i<buf.length;i++){ const v=(buf[i]-128)/128; sum += v*v; }
-      const rms = Math.sqrt(sum/buf.length);
-      let db = 20*Math.log10(rms || 1e-8);
-      if(!isFinite(db)) db=floor;
-      if (db<floor) db=floor;
-      const pct = Math.max(0, Math.min(100, ((db-floor)/(0-floor))*100));
-      meterBar.style.width = pct.toFixed(0) + '%';
-      rafId = requestAnimationFrame(tick);
-    };
-    rafId = requestAnimationFrame(tick);
-  }
-
-  function stopVU() {
-    cancelAnimationFrame(rafId);
-    try { if (srcNode) srcNode.disconnect(); } catch {}
-    try { if (analyser) analyser.disconnect(); } catch {}
-    try { if (audioCtx && audioCtx.state !== 'closed') audioCtx.close(); } catch {}
-    srcNode = null; analyser = null; audioCtx = null;
-    meterBar.style.width = '0%';
-  }
-
   async function startRec(){
     if (!navigator.mediaDevices?.getUserMedia){
       alert('이 환경에서는 마이크 접근을 지원하지 않습니다. HTTPS 또는 localhost에서 실행하세요.');
       return;
     }
     const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
-    streamRef = stream;
-
-    // ▼ VU 세팅
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    try { if (audioCtx.state === 'suspended') await audioCtx.resume(); } catch {}
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 2048;
-    srcNode = audioCtx.createMediaStreamSource(stream);
-    srcNode.connect(analyser);
-    startVU();
-
     chunks = [];
     const mime = pickMime();
     mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
@@ -183,11 +128,10 @@
       lastBase64 = dataURL.slice(dataURL.indexOf(',')+1); // 순수 Base64
       b64TA.value = lastBase64;
 
+      // 제목에 파일명 남겨두면 필요 시 Shortcuts가 읽어서 이름으로 사용 가능
       document.title = `Audio Ready: ${lastName}`;
-      doneBtn.disabled = false;
 
-      // ▼ VU 정리
-      stopVU();
+      doneBtn.disabled = false;
     };
 
     startTs = Date.now();
@@ -200,7 +144,7 @@
   function stopRec(){
     if (!mediaRecorder) return;
     mediaRecorder.stop();
-    try { mediaRecorder.stream.getTracks().forEach(t=>t.stop()); } catch {}
+    mediaRecorder.stream.getTracks().forEach(t=>t.stop());
     recordBtn.textContent = 'Record';
   }
 
@@ -216,7 +160,6 @@
         timerEl.textContent = '00:00';
         recordBtn.textContent = 'Record';
         mediaRecorder = null;
-        stopVU();
       }
     }
   }
@@ -228,6 +171,7 @@
     }
     try {
       await copyTextRobust(dataTA.value);
+      // 복사 완료 후: 현재 Web View 닫히고, Save Recording 단축어 실행
       const url = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME);
       location.href = url;
     } catch (e) {
@@ -237,14 +181,6 @@
 
   recordBtn.addEventListener('click', onRecordClick);
   doneBtn.addEventListener('click', onDoneClick);
-
-  // ▼ 페이지 열리자마자 자동 녹음 시작
-  document.addEventListener('DOMContentLoaded', () => {
-    // 자동 시작 실패 시에도 기존 버튼 동작은 그대로 유지
-    startRec().catch(err => {
-      console.warn('자동 녹음 시작 실패:', err);
-    });
-  });
 
   // 콘솔 안내: HTTPS/localhost 권장
   if (!(location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))) {
