@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-<title>Record → Clipboard → Close → Run Shortcut</title>
+<title>Record → Clipboard (Manual Close)</title>
 <style>
   body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto; padding:20px; }
   h1 { font-size:18px; margin:0 0 10px; }
@@ -13,12 +13,12 @@
   #timer { min-width:80px; font-variant-numeric: tabular-nums; }
   audio { width:100%; margin-top:12px; }
 
-  /* 전달된 텍스트 표시용 */
+  /* 전달 텍스트 표시(옵션) */
   .incoming-wrap { margin:12px 0 16px; padding:10px 12px; border:1px solid #e5e5ea; border-radius:10px; background:#f7f7f9; }
   .incoming-label { font-size:12px; color:#666; margin-bottom:6px; }
   .incoming-text { white-space:pre-wrap; word-break:break-word; font-size:16px; }
 
-  /* execCommand 폴백용 숨김 영역 */
+  /* 클립보드 폴백용 숨김 영역 */
   #b64, #dataurl { position:fixed; bottom:-9999px; left:0; width:1px; height:1px; opacity:0.001; }
 
   /* 녹음 중(Stop)일 때 버튼 빨간색 */
@@ -28,7 +28,7 @@
 <body>
   <h1>오디오 녹음</h1>
 
-  <!-- ▼ 전달받은 텍스트 표시 영역 -->
+  <!-- (옵션) 단축어에서 ?message=... 또는 #message=... 로 전달한 텍스트 표시 -->
   <div class="incoming-wrap" id="incomingBox" style="display:none;">
     <div class="incoming-label">Received text</div>
     <div class="incoming-text" id="incomingText"></div>
@@ -36,18 +36,18 @@
 
   <div class="row">
     <button id="recordBtn">Record</button>
-    <button id="doneBtn" disabled>Done</button>
     <span id="timer">00:00</span>
   </div>
 
   <audio id="player" controls></audio>
 
+  <!-- 폴백용 -->
   <textarea id="b64" readonly></textarea>
   <textarea id="dataurl" readonly></textarea>
 
 <script>
 (() => {
-  // ---------- 전달된 텍스트 표시 ----------
+  // ---------- 전달 텍스트 표시 (옵션) ----------
   function readIncoming() {
     const qs = new URLSearchParams(location.search);
     let v = qs.get('message');
@@ -59,7 +59,6 @@
     try { v = decodeURIComponent(v); } catch {}
     return v;
   }
-
   const msg = readIncoming();
   if (msg) {
     const box = document.getElementById('incomingBox');
@@ -68,12 +67,8 @@
     box.style.display = 'block';
   }
 
-  // ---------- 녹음 기능 ----------
-  const qs = new URLSearchParams(location.search);
-  const SHORTCUT_NAME = (qs.get('shortcut') || 'Save Recording').trim();
-
+  // ---------- 녹음 ----------
   const recordBtn = document.getElementById('recordBtn');
-  const doneBtn   = document.getElementById('doneBtn');
   const timerEl   = document.getElementById('timer');
   const player    = document.getElementById('player');
   const b64TA     = document.getElementById('b64');
@@ -107,13 +102,14 @@
   function blobToDataURL(blob){
     return new Promise((res,rej)=>{
       const fr=new FileReader();
-      fr.onload = ()=>res(fr.result);
+      fr.onload = ()=>res(fr.result); // data:audio/...;base64,AAAA...
       fr.onerror= rej;
       fr.readAsDataURL(blob);
     });
   }
 
   async function copyTextRobust(text){
+    // 1) 최신 API
     try{
       if ((location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))
           && navigator.clipboard && window.isSecureContext){
@@ -121,6 +117,7 @@
         return;
       }
     }catch(e){}
+    // 2) execCommand 폴백
     try{
       const ta = document.createElement('textarea');
       ta.value = text;
@@ -133,6 +130,7 @@
       document.body.removeChild(ta);
       if (ok) return;
     }catch(e){}
+    // 3) 화면 내 숨김 textarea
     b64TA.value = text;
     b64TA.focus(); b64TA.select(); b64TA.setSelectionRange(0, b64TA.value.length);
     const ok3 = document.execCommand('copy');
@@ -154,29 +152,41 @@
     mediaRecorder.onstop = async () => {
       clearInterval(tickId);
       timerEl.textContent = '00:00';
+
       const type = mediaRecorder.mimeType || 'audio/mp4';
       const blob = new Blob(chunks, { type });
       lastMime = type;
       const ext  = type.includes('mp4') ? 'm4a' : (type.includes('webm') ? 'webm' : 'm4a');
       lastName = `recording_${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
       player.src = URL.createObjectURL(blob);
+
       const dataURL = await blobToDataURL(blob);
       dataTA.value = dataURL;
       lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);
       b64TA.value = lastBase64;
       document.title = `Audio Ready: ${lastName}`;
-      doneBtn.disabled = false;
+
+      // ✅ 자동 닫기/이동 없이, 클립보드에만 복사
+      try {
+        await copyTextRobust(dataURL);
+        // 여기서 창은 닫지 않습니다. (사용자가 수동으로 닫기)
+      } catch (e) {
+        alert('클립보드 복사에 실패했습니다. 페이지에서 직접 복사하세요.');
+      }
     };
 
     startTs = Date.now();
     tickId = setInterval(()=> timerEl.textContent = fmt(Date.now()-startTs), 250);
     mediaRecorder.start(250);
+
+    // 버튼 상태를 녹음 중(빨간색)으로 전환, 텍스트 카운트다운은 Ready → Go (각 0.8s)
     recordBtn.classList.add('danger');
+    showCountdownWhileRecording();
   }
 
   function stopRec(){
     if (!mediaRecorder) return;
-    countdownToken++;
+    countdownToken++; // 진행 중 카운트다운 취소
     mediaRecorder.stop();
     mediaRecorder.stream.getTracks().forEach(t=>t.stop());
     recordBtn.textContent = 'Record';
@@ -185,11 +195,14 @@
 
   async function showCountdownWhileRecording(){
     const myToken = ++countdownToken;
-    for (const n of [2,1]){  // 카운트다운 2 → 1
+    const steps = ['Ready','Go'];      // ◀ Ready → Go
+    const stepDelay = 800;             // ◀ 각 0.8초
+
+    for (const label of steps){
       if (myToken !== countdownToken) return;
       if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
-      recordBtn.textContent = String(n);
-      await sleep(1000);
+      recordBtn.textContent = label;
+      await sleep(stepDelay);
     }
     if (myToken === countdownToken && mediaRecorder && mediaRecorder.state === 'recording'){
       recordBtn.textContent = 'Stop';
@@ -198,11 +211,11 @@
 
   async function onRecordClick(){
     if (mediaRecorder && mediaRecorder.state === 'recording'){
+      // Stop: 정지하면 onstop에서 클립보드로 복사 (창은 닫지 않음)
       stopRec();
     } else {
       try {
-        await startRec();
-        showCountdownWhileRecording();
+        await startRec();   // 즉시 녹음 시작
       } catch(e){
         console.error(e);
         alert('마이크 권한 또는 녹음 시작 실패.');
@@ -215,22 +228,7 @@
     }
   }
 
-  async function onDoneClick(){
-    if (!lastBase64){
-      alert('복사할 녹음이 없습니다.');
-      return;
-    }
-    try {
-      await copyTextRobust(dataTA.value);
-      const url = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME);
-      location.href = url;
-    } catch {
-      alert('복사 실패');
-    }
-  }
-
   recordBtn.addEventListener('click', onRecordClick);
-  doneBtn.addEventListener('click', onDoneClick);
 })();
 </script>
 </body>
