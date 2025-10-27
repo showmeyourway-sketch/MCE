@@ -12,6 +12,13 @@
   button[disabled]{ opacity:.5; }
   #timer { min-width:80px; font-variant-numeric: tabular-nums; }
   audio { width:100%; margin-top:12px; }
+
+  /* 전달된 텍스트 표시용 */
+  .incoming-wrap { margin:12px 0 16px; padding:10px 12px; border:1px solid #e5e5ea; border-radius:10px; background:#f7f7f9; }
+  .incoming-label { font-size:12px; color:#666; margin-bottom:6px; }
+  .incoming-text { white-space:pre-wrap; word-break:break-word; font-size:16px; }
+
+  /* execCommand 폴백용 숨김 영역 */
   #b64, #dataurl { position:fixed; bottom:-9999px; left:0; width:1px; height:1px; opacity:0.001; }
 
   /* 녹음 중(Stop)일 때 버튼 빨간색 */
@@ -20,11 +27,19 @@
 </head>
 <body>
   <h1>오디오 녹음</h1>
+
+  <!-- ▼ 전달받은 텍스트 표시 영역 -->
+  <div class="incoming-wrap" id="incomingBox" style="display:none;">
+    <div class="incoming-label">Received text</div>
+    <div class="incoming-text" id="incomingText"></div>
+  </div>
+
   <div class="row">
     <button id="recordBtn">Record</button>
     <button id="doneBtn" disabled>Done</button>
     <span id="timer">00:00</span>
   </div>
+
   <audio id="player" controls></audio>
 
   <textarea id="b64" readonly></textarea>
@@ -32,6 +47,28 @@
 
 <script>
 (() => {
+  // ---------- 전달된 텍스트 표시 ----------
+  function readIncoming() {
+    const qs = new URLSearchParams(location.search);
+    let v = qs.get('message');
+    if (!v && location.hash) {
+      const h = location.hash.replace(/^#/, '');
+      if (h.startsWith('message=')) v = h.slice('message='.length);
+    }
+    if (!v) return '';
+    try { v = decodeURIComponent(v); } catch {}
+    return v;
+  }
+
+  const msg = readIncoming();
+  if (msg) {
+    const box = document.getElementById('incomingBox');
+    const el  = document.getElementById('incomingText');
+    el.innerText = msg;
+    box.style.display = 'block';
+  }
+
+  // ---------- 녹음 기능 ----------
   const qs = new URLSearchParams(location.search);
   const SHORTCUT_NAME = (qs.get('shortcut') || 'Save Recording').trim();
 
@@ -46,7 +83,12 @@
   let lastBase64='', lastName='', lastMime='';
   let countdownToken = 0;
 
-  const fmt = ms => { const s=Math.floor(ms/1000), m=String(Math.floor(s/60)).padStart(2,'0'), ss=String(s%60).padStart(2,'0'); return `${m}:${ss}`; };
+  const fmt = ms => {
+    const s=Math.floor(ms/1000),
+          m=String(Math.floor(s/60)).padStart(2,'0'),
+          ss=String(s%60).padStart(2,'0');
+    return `${m}:${ss}`;
+  };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   function pickMime(){
@@ -143,7 +185,7 @@
 
   async function showCountdownWhileRecording(){
     const myToken = ++countdownToken;
-    for (const n of [2,1]){  // 🔹 여기서 3,2,1 → 2,1로 변경
+    for (const n of [2,1]){  // 카운트다운 2 → 1
       if (myToken !== countdownToken) return;
       if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
       recordBtn.textContent = String(n);
