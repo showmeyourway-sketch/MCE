@@ -1,267 +1,92 @@
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-<title>Auto Record + VU → Clipboard → Run Shortcut</title>
-<style>
-  :root { --primary:#007aff; --danger:#ff3b30; --border:#dadada; }
-  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; padding:20px; }
-  h1 { font-size:18px; margin:0 0 10px; }
-  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:10px 0; }
-  button { padding:10px 14px; border:0; border-radius:10px; background:#007aff; color:#fff; font-size:16px; }
-  button[disabled]{ opacity:.5; }
-  .badge { font-size:12px; padding:4px 8px; border-radius:999px; background:#f2f2f7; border:1px solid #e5e5ea; }
-  .rec   { color:#fff; background:var(--danger); border-color:var(--danger); }
-  #timer { min-width:80px; font-variant-numeric: tabular-nums; }
-  audio { width:100%; margin-top:12px; }
-  .meter-wrap { margin-top:8px; height:16px; border-radius:999px; background:#f2f2f7; border:1px solid #e5e5ea; overflow:hidden; }
-  .meter-bar { height:100%; width:0%; background:linear-gradient(90deg,#34c759,#ffcc00,#ff3b30); transition:width .08s linear; }
-  /* execCommand 폴백용 숨김 영역 (iOS용 실제 선택 필요 시 화면 안쪽 배치) */
-  #hiddenTA { position:fixed; bottom:-9999px; left:0; width:1px; height:1px; opacity:0.001; }
-</style>
-</head>
-<body>
-  <h1>오디오 녹음</h1>
-  <div class="row">
-    <span class="badge" id="perm">Mic: requesting…</span>
-    <span class="badge" id="state">Recorder: idle</span>
-    <span class="badge rec" id="recDot" style="display:none;">● REC</span>
-    <span class="badge" id="timer">00:00</span>
-    <button id="enableBtn" style="display:none; background:#e9e9ed; color:#111;">Enable Audio</button>
-  </div>
-
-  <div class="meter-wrap" aria-label="VU meter">
-    <div class="meter-bar" id="meterBar"></div>
-  </div>
-
-  <div class="row">
-    <button id="doneBtn" disabled>Done</button>
-  </div>
-
-  <audio id="player" controls></audio>
-
-  <!-- 클립보드 폴백용 -->
-  <textarea id="hiddenTA" readonly></textarea>
-
-<script>
-(() => {
-  // ======== 설정 ========
-  const qs = new URLSearchParams(location.search);
-  const SHORTCUT_NAME = (qs.get('shortcut') || 'Save Recording').trim();
-
-  // ======== 엘리먼트 ========
-  const permEl    = document.getElementById('perm');
-  const stateEl   = document.getElementById('state');
-  const recDot    = document.getElementById('recDot');
-  const timerEl   = document.getElementById('timer');
-  const meterBar  = document.getElementById('meterBar');
-  const enableBtn = document.getElementById('enableBtn');
-  const doneBtn   = document.getElementById('doneBtn');
-  const player    = document.getElementById('player');
-  const hiddenTA  = document.getElementById('hiddenTA');
-
-  // ======== 상태 ========
-  let stream=null, ctx=null, analyser=null, srcNode=null, rafId=null;
-  let mediaRecorder=null, chunks=[], startedAt=0, timerTick=null;
-  let lastDataURL='', lastMime='';
-
-  // ======== 유틸 ========
-  const fmt = ms => {
-    const s=Math.floor(ms/1000);
-    return `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
-  };
-
-  function pickMime(){
-    const cands = [
-      'audio/mp4;codecs=mp4a.40.2', // m4a 선호(사파리 친화)
-      'audio/mp4',
-      'audio/webm;codecs=opus',
-      'audio/webm'
-    ];
-    for (const m of cands){
-      if (window.MediaRecorder?.isTypeSupported?.(m)) return m;
-    }
-    return '';
-  }
-
-  function blobToDataURL(blob){
-    return new Promise((res,rej)=>{
-      const fr=new FileReader();
-      fr.onload = ()=>res(fr.result); // "data:audio/...;base64,AAAA..."
-      fr.onerror= rej;
-      fr.readAsDataURL(blob);
-    });
-  }
-
-  async function copyTextRobust(text){
-    // 1) 최신 API (보안 맥락 필요)
-    try{
-      if ((location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))
-          && navigator.clipboard && window.isSecureContext){
-        await navigator.clipboard.writeText(text);
-        return;
-      }
-    }catch(e){}
-    // 2) execCommand 폴백
-    try{
-      hiddenTA.value = text;
-      hiddenTA.focus(); hiddenTA.select(); hiddenTA.setSelectionRange(0, hiddenTA.value.length);
-      const ok = document.execCommand('copy');
-      if (ok) return;
-    }catch(e){}
-    throw new Error('Copy failed');
-  }
-
-  // ======== 자동 시작 ========
-  document.addEventListener('DOMContentLoaded', autoStart);
-
-  async function autoStart(){
-    try{
-      permEl.textContent = 'Mic: requesting…';
-      stream = await navigator.mediaDevices.getUserMedia({ audio:true });
-      permEl.textContent = 'Mic: granted';
-
-      // WebAudio for VU
-      ctx = new (window.AudioContext || window.webkitAudioContext)();
-      await tryResumeAudio();
-
-      analyser = ctx.createAnalyser();
-      analyser.fftSize = 2048;
-      srcNode = ctx.createMediaStreamSource(stream);
-      srcNode.connect(analyser);
-
-      startVU();
-      startTimer();
-
-      // MediaRecorder
-      const mime = pickMime();
-      mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
-      mediaRecorder.onstart = () => setRecUI(true);
-      mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
-      mediaRecorder.onstop = onStop;
-
-      mediaRecorder.start(500); // 즉시 시작
-      stateEl.textContent = 'Recorder: starting…';
-    }catch(err){
-      console.error(err);
-      permEl.textContent = 'Mic: denied or error';
-      stateEl.textContent = 'Recorder: error';
-      enableBtn.style.display = 'inline-block';
-      enableBtn.onclick = ()=>location.reload();
-    }
-  }
-
-  async function tryResumeAudio(){
-    if (ctx.state === 'suspended') { try { await ctx.resume(); } catch {} }
-    if (ctx.state !== 'running') {
-      enableBtn.style.display = 'inline-block';
-      enableBtn.onclick = async ()=>{ try { await ctx.resume(); } catch {} if(ctx.state==='running') enableBtn.style.display='none'; };
-    }
-  }
-
-  function setRecUI(isRec){
-    stateEl.textContent = isRec ? 'Recorder: recording' : 'Recorder: stopped';
-    recDot.style.display = isRec ? 'inline-block' : 'none';
-  }
-
-  // ======== VU ========
-  function startVU(){
-    const buf = new Uint8Array(analyser.fftSize);
-    const floor = -60;
-    function tick(){
-      analyser.getByteTimeDomainData(buf);
-      let sum=0; for (let i=0;i<buf.length;i++){ const v=(buf[i]-128)/128; sum += v*v; }
-      const rms = Math.sqrt(sum/buf.length);
-      let db = 20*Math.log10(rms || 1e-8);
-      if(!isFinite(db)) db = floor;
-      if(db<floor) db=floor;
-      const pct = Math.max(0, Math.min(100, ((db-floor)/(0-floor))*100));
-      meterBar.style.width = pct.toFixed(0)+'%';
-      rafId = requestAnimationFrame(tick);
-    }
-    cancelAnimationFrame(rafId);
-    rafId = requestAnimationFrame(tick);
-  }
-
-  function startTimer(){
-    startedAt = Date.now();
-    timerEl.textContent = '00:00';
-    clearInterval(timerTick);
-    timerTick = setInterval(()=> timerEl.textContent = fmt(Date.now()-startedAt), 250);
-  }
-
-  function stopCaptureNodes(){
-    if (srcNode) try{ srcNode.disconnect(); }catch{}
-    if (analyser) try{ analyser.disconnect(); }catch{}
-    if (stream) stream.getTracks().forEach(t=>t.stop());
-    if (ctx && ctx.state !== 'closed') ctx.close();
-    cancelAnimationFrame(rafId);
-    clearInterval(timerTick);
-    setRecUI(false);
-  }
-
-  // ======== Done: 정지 → Data URL 만들고 클립보드 복사 → 단축어 실행 ========
-  doneBtn.addEventListener('click', async () => {
-    try{
-      doneBtn.disabled = true;
-
-      // 사용자 제스처 콜스택 내에서 최대한 진행
-      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-        // onstop에서 최종 처리
-        mediaRecorder.stop();
-      } else {
-        // 이미 정지 상태면 바로 단축어 실행 (클립보드에 값이 있어야 함)
-        if (!lastDataURL) { alert('복사할 녹음이 없습니다.'); return; }
-        await copyTextRobust(lastDataURL);
-        location.href = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME);
-      }
-    } catch (e) {
-      console.error(e); alert('처리 중 오류가 발생했습니다.');
-      doneBtn.disabled = false;
-    }
+// --- 유틸: onstop을 프로미스로 대기 ---
+function waitForStop(rec) {
+  return new Promise((resolve) => {
+    const prevOnStop = rec.onstop;
+    rec.onstop = (ev) => {
+      try { prevOnStop && prevOnStop(ev); } catch {}
+      resolve();
+    };
   });
+}
 
-  async function onStop(){
-    try{
-      clearInterval(timerTick);
-      timerEl.textContent = '00:00';
-      stopCaptureNodes();
+// --- Done: 정지 → 마지막 청크 강제 플러시 → onstop 확실히 대기 → 처리 ---
+doneBtn.addEventListener('click', async () => {
+  try {
+    doneBtn.disabled = true;
 
-      const type = (mediaRecorder && mediaRecorder.mimeType) || 'audio/mp4';
-      lastMime = type;
-
-      const blob = new Blob(chunks, { type });
-      chunks = []; // reset for 안전
-      player.src = URL.createObjectURL(blob);
-
-      lastDataURL = await blobToDataURL(blob); // 전체 Data URL
-      // 페이지 Title에 힌트용 파일명 남기기(선택)
-      const ext = type.includes('mp4') ? 'm4a' : (type.includes('webm') ? 'webm' : 'm4a');
-      document.title = `Audio Ready (${ext})`;
-
-      // ✅ 클립보드 복사 → ✅ 단축어 실행 (팝업 없이 넘어가던 흐름)
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+      if (!lastDataURL) { alert('복사할 녹음이 없습니다.'); doneBtn.disabled = false; return; }
       await copyTextRobust(lastDataURL);
       location.href = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME);
-    }catch(err){
-      console.error(err);
-      alert('녹음 마무리 중 오류가 발생했습니다.');
+      return;
+    }
+
+    // 사용자 제스처 콜스택에서 즉시 플로우 시작
+    // 1) 마지막 버퍼를 강제로 요청 (타임슬라이스 경계 손실 방지)
+    if (typeof mediaRecorder.requestData === 'function') {
+      try { mediaRecorder.requestData(); } catch {}
+    }
+
+    // 2) onstop 대기 준비
+    const stopped = waitForStop(mediaRecorder);
+
+    // 3) 정지
+    mediaRecorder.stop();
+
+    // 4) onstop 이벤트가 실제로 끝날 때까지 기다림
+    await stopped;
+
+    // 5) 이후 처리(onStop에서 오류났다면 여기서 다시 안전 처리)
+    await finalizeAfterStop();   // 아래 새 함수
+  } catch (e) {
+    console.error(e);
+    alert('녹음 마무리 중 오류가 발생했습니다. (E1)');
+    doneBtn.disabled = false;
+  }
+});
+
+// 기존 onStop 내용은 블롭 생성만 남기고, 나머지는 별도 함수에서 처리
+async function onStop(){
+  try {
+    clearInterval(timerTick);
+    timerEl.textContent = '00:00';
+    setRecUI(false);
+
+    const type = (mediaRecorder && mediaRecorder.mimeType) || 'audio/mp4';
+    lastMime = type;
+
+    const blob = new Blob(chunks, { type });
+    chunks = []; // reset
+    try { player.src = URL.createObjectURL(blob); } catch {}
+
+    lastDataURL = await blobToDataURL(blob); // 청크가 없어도 Data URL은 생성됨(빈 데이터)
+    // 힌트용 제목
+    const ext = type.includes('mp4') ? 'm4a' : (type.includes('webm') ? 'webm' : 'm4a');
+    document.title = `Audio Ready (${ext})`;
+
+  } catch (err) {
+    console.error(err);
+    // onStop 내부 에러는 finalize에서 한 번 더 방어
+  } finally {
+    // 노드/트랙 정리는 마지막에
+    stopCaptureNodes();
+  }
+}
+
+// onStop 이후 최종 단계 (클립보드 복사 → 단축어 실행)
+async function finalizeAfterStop(){
+  try {
+    if (!lastDataURL || typeof lastDataURL !== 'string') {
+      // 혹시 비어있으면 최소한의 무음 파일로 대체 혹은 사용자 안내
+      alert('오디오 데이터가 비어 있습니다. 다시 시도해 주세요.');
       doneBtn.disabled = false;
+      return;
     }
+    await copyTextRobust(lastDataURL);
+    location.href = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME);
+  } catch (e) {
+    console.error(e);
+    alert('녹음 마무리 중 오류가 발생했습니다. (E2: copy/handoff)');
+    doneBtn.disabled = false;
   }
-
-  // 녹음이 시작되면 Done 사용 가능(사용자 의도에 맞게 바로 전송 가능)
-  const enableDoneWhenRecording = setInterval(()=>{
-    if (mediaRecorder && mediaRecorder.state === 'recording') {
-      doneBtn.disabled = false; clearInterval(enableDoneWhenRecording);
-    }
-  }, 200);
-
-  // 참고: HTTPS/localhost 권장
-  if (!(location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))) {
-    console.warn('HTTPS 또는 localhost에서 실행해야 마이크/클립보드가 안정적으로 동작합니다.');
-  }
-})();
-</script>
-</body>
-</html>
+}
