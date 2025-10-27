@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-<title>Record → Done → Run Shortcut</title>
+<title>Record → Done → Run Shortcut (Multiline)</title>
 <style>
   body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto; padding:20px; }
   h1 { font-size:18px; margin:0 0 10px; }
@@ -22,6 +22,9 @@
 
   /* execCommand 폴백용 숨김 영역 */
   #b64, #dataurl { position:fixed; bottom:-9999px; left:0; width:1px; height:1px; opacity:0.001; }
+
+  /* 메타 저장용 숨김 입력 */
+  .hidden { position:fixed; left:-9999px; width:1px; height:1px; opacity:0; }
 </style>
 </head>
 <body>
@@ -40,30 +43,49 @@
 
   <audio id="player" controls></audio>
 
-  <textarea id="b64" readonly></textarea>
-  <textarea id="dataurl" readonly></textarea>
+  <!-- 폴백/데이터 보관 -->
+  <textarea id="b64" class="hidden" readonly></textarea>
+  <textarea id="dataurl" class="hidden" readonly></textarea>
+
+  <!-- 메타 저장용 (name/title/subtitle) -->
+  <input id="metaName" class="hidden" readonly />
+  <input id="metaTitle" class="hidden" readonly />
+  <input id="metaSubtitle" class="hidden" readonly />
 
 <script>
 (() => {
-  // ---------- 전달된 텍스트 표시 ----------
-  function readIncoming() {
-    const qs = new URLSearchParams(location.search);
-    let v = qs.get('message');
-    if (!v && location.hash) {
-      const h = location.hash.replace(/^#/, '');
-      if (h.startsWith('message=')) v = h.slice('message='.length);
-    }
-    if (!v) return '';
-    try { v = decodeURIComponent(v); } catch {}
-    return v;
+  // ---------- 전달된 텍스트(4줄) 파싱 ----------
+  function readIncoming4Lines() {
+    const getRaw = () => {
+      const qs = new URLSearchParams(location.search);
+      let v = qs.get('message');
+      if (!v && location.hash) {
+        const h = location.hash.replace(/^#/, '');
+        if (h.startsWith('message=')) v = h.slice('message='.length);
+        else v = decodeURIComponent(h);
+      }
+      return v || '';
+    };
+    let raw = getRaw();
+    try { raw = decodeURIComponent(raw); } catch {}
+    const lines = raw.split(/\r?\n/);
+    return {
+      name:      lines[0] || '',
+      title:     lines[1] || '',
+      subtitle:  lines[2] || '',
+      received:  lines[3] || ''
+    };
   }
 
-  const msg = readIncoming();
-  if (msg) {
-    const box = document.getElementById('incomingBox');
-    const el  = document.getElementById('incomingText');
-    el.innerText = msg;
-    box.style.display = 'block';
+  const incoming = readIncoming4Lines();
+  // 메타 저장
+  metaName.value = incoming.name;
+  metaTitle.value = incoming.title;
+  metaSubtitle.value = incoming.subtitle;
+  // 화면 표시(4번째 줄만)
+  if (incoming.received) {
+    incomingText.innerText = incoming.received;
+    incomingBox.style.display = 'block';
   }
 
   // ---------- 녹음 기능 ----------
@@ -78,7 +100,6 @@
 
   let mediaRecorder=null, chunks=[], startTs=0, tickId=0;
   let lastBase64='', lastName='', lastMime='';
-  let countdownToken = 0;
 
   const fmt = ms => {
     const s=Math.floor(ms/1000),
@@ -145,10 +166,10 @@
     const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
     chunks = [];
     const mime = pickMime();
-    // ↓ 비트레이트를 64kbps로 설정
+    // 64kbps로 용량 절감
     const options = mime
-      ? { mimeType: mime, audioBitsPerSecond: 48000 }
-      : { audioBitsPerSecond: 48000 };
+      ? { mimeType: mime, audioBitsPerSecond: 64000 }
+      : { audioBitsPerSecond: 64000 };
     mediaRecorder = new MediaRecorder(stream, options);
 
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
@@ -159,12 +180,17 @@
       const blob = new Blob(chunks, { type });
       lastMime = type;
       const ext  = type.includes('mp4') ? 'm4a' : (type.includes('webm') ? 'webm' : 'm4a');
-      lastName = `recording_${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
+      // 파일명은 name이 있으면 우선 사용, 없으면 timestamp
+      const baseName = metaName.value.trim() || 'recording_' + new Date().toISOString().replace(/[:.]/g,'-');
+      lastName = `${baseName}.${ext}`;
       player.src = URL.createObjectURL(blob);
+
       const dataURL = await blobToDataURL(blob);
       dataTA.value = dataURL;
       lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);
       b64TA.value = lastBase64;
+
+      // 문서 제목에도 남겨두기
       document.title = `Audio Ready: ${lastName}`;
 
       // Stop → Done 으로 전환
@@ -184,9 +210,8 @@
 
   async function stopRec(){
     if (!mediaRecorder) return;
-    countdownToken++;
     mediaRecorder.stop();
-    mediaRecorder.stream.getTracks().forEach(t=>t.stop());
+    try { mediaRecorder.stream.getTracks().forEach(t=>t.stop()); } catch {}
   }
 
   async function onRecordClick(){
@@ -204,18 +229,27 @@
         mediaRecorder = null;
       }
     } else if (label === 'Stop') {
-      stopRec();
+      await stopRec();
     } else if (label === 'Done') {
-      if (!lastBase64){
+      if (!dataTA.value) {
         alert('복사할 녹음이 없습니다.');
         return;
       }
+      // 멀티라인 페이로드: name, title, subtitle, received, dataURL(5행)
+      const payload = [
+        metaName.value || '',
+        metaTitle.value || '',
+        metaSubtitle.value || '',
+        incoming.received || '',
+        dataTA.value || ''
+      ].join('\n');
+
       try {
-        await copyTextRobust(dataTA.value);
+        await copyTextRobust(payload);
         const url = "shortcuts://run-shortcut?name=" + encodeURIComponent('Save Recording');
         location.href = url;
       } catch {
-        alert('복사 실패');
+        alert('클립보드 복사 실패');
       }
     }
   }
