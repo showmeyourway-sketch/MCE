@@ -147,8 +147,8 @@
     const mime = pickMime();
     // ↓ 비트레이트를 64kbps로 설정
     const options = mime
-      ? { mimeType: mime, audioBitsPerSecond: 64000 }
-      : { audioBitsPerSecond: 64000 };
+      ? { mimeType: mime, audioBitsPerSecond: 48000 }
+      : { audioBitsPerSecond: 48000 };
     mediaRecorder = new MediaRecorder(stream, options);
 
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
