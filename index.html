@@ -10,7 +10,6 @@
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:10px 0; }
   button { padding:10px 14px; border:0; border-radius:10px; background:#007aff; color:#fff; font-size:16px; }
   #timer { min-width:80px; font-variant-numeric: tabular-nums; }
-  audio { width:100%; margin-top:12px; }
   #b64, #dataurl { position:fixed; bottom:-9999px; left:0; width:1px; height:1px; opacity:0.001; }
 </style>
 </head>
@@ -20,8 +19,6 @@
     <button id="recordBtn">Record</button>
     <span id="timer">00:00</span>
   </div>
-  <audio id="player" controls></audio>
-
   <textarea id="b64" readonly></textarea>
   <textarea id="dataurl" readonly></textarea>
 
@@ -29,7 +26,6 @@
 (() => {
   const recordBtn = document.getElementById('recordBtn');
   const timerEl   = document.getElementById('timer');
-  const player    = document.getElementById('player');
   const b64TA     = document.getElementById('b64');
   const dataTA    = document.getElementById('dataurl');
 
@@ -77,6 +73,10 @@
       return;
     }
     const stream=await navigator.mediaDevices.getUserMedia({ audio:true });
+
+    // 🎧 마이크 안정화: Safari에서 앞부분 잘림 방지 (0.5초 대기)
+    await new Promise(r=>setTimeout(r,500));
+
     chunks=[];
     const mime=pickMime();
     mediaRecorder=mime?new MediaRecorder(stream,{ mimeType:mime }):new MediaRecorder(stream);
@@ -84,15 +84,22 @@
     mediaRecorder.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
 
     mediaRecorder.onstop=async ()=>{
-      clearInterval(tickId); timerEl.textContent='00:00';
+      clearInterval(tickId);
+      timerEl.textContent='00:00';
       const type=mediaRecorder.mimeType||'audio/mp4';
       const blob=new Blob(chunks,{type});
-      player.src=URL.createObjectURL(blob);
 
+      // ✅ player를 녹음이 끝난 후에 생성 (루프백 방지)
+      const player=document.createElement('audio');
+      player.controls=true;
+      player.src=URL.createObjectURL(blob);
+      player.style.display='block';
+      player.style.marginTop='12px';
+      document.body.appendChild(player);
+
+      // ✅ 자동 클립보드 복사 (data:audio/mp4;base64,...)
       const dataURL=await blobToDataURL(blob);
       dataTA.value=dataURL;
-
-      // ✅ 녹음이 끝나자마자 자동 복사
       await copyTextRobust(dataURL);
 
       // ✅ Wait to Return: Off → 자동으로 다음 액션으로 넘어감
