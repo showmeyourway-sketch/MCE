@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-<title>Record → Stop(Processing) → Done (Multiline, Pre-armed Mic)</title>
+<title>Record → Stop(Processing) → Done (PointerDown Sync, Pre-armed Mic)</title>
 <style>
   body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto; padding:20px; }
   h1 { font-size:18px; margin:0 0 10px; }
@@ -53,7 +53,7 @@
   <audio id="player" controls></audio>
 
   <!-- 숨김 보관 -->
-  <textarea id="b64" class="hidden" readonly></textarea>
+  <textarea id="b64" class="hidden" readonly></textarea>      <!-- 페이로드 stash로 재활용 -->
   <textarea id="dataurl" class="hidden" readonly></textarea>
   <input id="metaName" class="hidden" readonly />
   <input id="metaTitle" class="hidden" readonly />
@@ -68,7 +68,7 @@
   const recordBtn    = document.getElementById('recordBtn');
   const timerEl      = document.getElementById('timer');
   const player       = document.getElementById('player');
-  const b64TA        = document.getElementById('b64');
+  const b64TA        = document.getElementById('b64');      // 페이로드 stash
   const dataTA       = document.getElementById('dataurl');
   const metaName     = document.getElementById('metaName');
   const metaTitle    = document.getElementById('metaTitle');
@@ -114,7 +114,6 @@
   let stream = null;                 // 페이지 로드 즉시 열어 둘 마이크 스트림
   let audioCtx = null, analyser = null, rafId = 0;
   let mediaRecorder=null, chunks=[], startTs=0, tickId=0;
-  let lastBase64='', lastName='', lastMime='';
   let recording = false;
   let navigating = false;
   let readyForRecord = false;        // VU 준비 완료 시 true
@@ -248,7 +247,7 @@
       ? 'audio/mp4;codecs=mp4a.40.2'
       : ((MediaRecorder.isTypeSupported('audio/mp4')) ? 'audio/mp4' : '');
 
-    // 비트레이트: 64kbps 권장(안정성/용량 밸런스) — 필요 시 변경
+    // 비트레이트: 64kbps 권장(안정성/용량 밸런스)
     const options = mime
       ? { mimeType: mime, audioBitsPerSecond: 64000 }
       : { audioBitsPerSecond: 64000 };
@@ -283,20 +282,17 @@
       const blob = new Blob(chunks, { type });
       const ext  = type.includes('mp4') ? 'm4a' : (type.includes('webm') ? 'webm' : 'm4a');
       const baseName = (metaName.value.trim() || ('recording_' + new Date().toISOString().replace(/[:.]/g,'-')));
-      lastName = `${baseName}.${ext}`;
-      lastMime = type;
+      const fileName = `${baseName}.${ext}`;
 
       player.src = URL.createObjectURL(blob);
 
       // DataURL 변환
       const dataURL = await blobToDataURL(blob);
       dataTA.value = dataURL;
-      lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);
-      b64TA.value = lastBase64;
 
-      document.title = `Audio Ready: ${lastName}`;
+      document.title = `Audio Ready: ${fileName}`;
 
-      // 페이로드(멀티라인 5줄) 미리 준비
+      // ✅ 페이로드(멀티라인 5줄) 미리 준비 + 숨김 textarea에 stash
       preparedPayload = [
         metaName.value || '',
         metaTitle.value || '',
@@ -304,14 +300,13 @@
         incoming.received || '',
         dataURL || ''
       ].join('\n');
+      b64TA.value = preparedPayload; // stash
 
       // Stop 시점 안정화: VU 일시정지(오디오는 유지)
       pauseVU({releaseAudio:true});
 
       // 이제 Done 노출
-      recordBtn.textContent = 'Done';
-      recordBtn.classList.add('done');
-      recordBtn.disabled = false;
+      showDoneButton();
 
     } catch (e){
       console.error(e);
@@ -321,16 +316,31 @@
     }
   }
 
-  // Done: 동기 복사 + 즉시 전환(연속 백업)
-  function doDoneNavigation(){
-    if (!preparedPayload){
+  // Done 버튼 노출 + pointerdown 핸들러 연결
+  function showDoneButton(){
+    recordBtn.textContent = 'Done';
+    recordBtn.classList.add('done');
+    recordBtn.disabled = false;
+
+    // 중복 부착 방지
+    recordBtn.removeEventListener('pointerdown', onDonePointerDown);
+    recordBtn.addEventListener('pointerdown', onDonePointerDown, { passive:false });
+  }
+
+  // Done: pointerdown에서 동기 복사 + 즉시 전환 (제스처 체인 유지)
+  function onDonePointerDown(e){
+    e.preventDefault(); e.stopPropagation();
+
+    const payload = b64TA.value || preparedPayload || '';
+    if (!payload){
       alert('복사할 녹음이 없습니다.');
       return;
     }
-    // 동기 복사
+
+    // 동기 복사 (execCommand)
     try {
       const ta = document.createElement('textarea');
-      ta.value = preparedPayload;
+      ta.value = payload;
       ta.setAttribute('readonly','');
       ta.style.position = 'fixed';
       ta.style.left = '0'; ta.style.bottom = '0'; ta.style.opacity = '0.001';
@@ -343,11 +353,13 @@
       alert('클립보드 복사 실패');
       return;
     }
+
+    // 같은 제스처 안에서 즉시 전환
     const url = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME || 'Save Recording');
     attemptOpenShortcut(url);
   }
 
-  // ---------- 버튼 핸들러 ----------
+  // ---------- 버튼 핸들러 (Record/Stop만 담당; Done은 pointerdown이 담당) ----------
   async function onRecordClick(){
     const label = recordBtn.textContent.trim();
     try {
@@ -356,8 +368,8 @@
       } else if (label === 'Stop') {
         await stopAndProcess();
       } else if (label === 'Done') {
-        // 동기 복사 + 즉시 전환
-        doDoneNavigation();
+        // Done은 pointerdown에서 처리하므로 여기서는 아무 것도 하지 않음.
+        return;
       }
     } catch (e){
       console.error(e);
