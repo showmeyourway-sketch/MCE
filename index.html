@@ -3,24 +3,26 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-<title>Record → Done → Run Shortcut (Multiline, Pre-armed Mic)</title>
+<title>Record → Stop(Processing) → Done (Multiline, Pre-armed Mic)</title>
 <style>
   body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto; padding:20px; }
   h1 { font-size:18px; margin:0 0 10px; }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:10px 0; }
   button { padding:10px 14px; border:0; border-radius:10px; color:#fff; font-size:16px; cursor:pointer; }
-  #recordBtn { background:#007aff; }
+  #recordBtn { background:#007aff; display:none; } /* 준비되기 전까지 숨김 */
   #recordBtn.danger { background:#ff3b30; } /* Stop 상태(빨강) */
-  #recordBtn.done { background:#34c759; }   /* Done 상태(초록) */
+  #recordBtn.done   { background:#34c759; } /* Done 상태(초록) */
   #timer { min-width:80px; font-variant-numeric: tabular-nums; margin-left:10px; }
   audio { width:100%; margin-top:12px; }
+
+  .status { font-size:14px; color:#666; margin:8px 0 12px; }
 
   /* 전달된 텍스트 표시용 */
   .incoming-wrap { margin:12px 0 16px; padding:10px 12px; border:1px solid #e5e5ea; border-radius:10px; background:#f7f7f9; }
   .incoming-label { font-size:12px; color:#666; margin-bottom:6px; }
   .incoming-text { white-space:pre-wrap; word-break:break-word; font-size:16px; }
 
-  /* execCommand 폴백/데이터 보관 숨김 영역 */
+  /* 숨김 보관 영역 */
   .hidden { position:fixed; left:-9999px; width:1px; height:1px; opacity:0.001; }
 
   /* VU 바 (빨간색) */
@@ -30,6 +32,9 @@
 </head>
 <body>
   <h1>오디오 녹음</h1>
+
+  <!-- 마이크 준비 상태 -->
+  <div class="status" id="statusText">마이크 준비 중… 권한 요청이 뜨면 허용해 주세요.</div>
 
   <!-- ▼ 전달받은 텍스트 표시 영역 (4번째 줄만 노출) -->
   <div class="incoming-wrap" id="incomingBox" style="display:none;">
@@ -47,29 +52,28 @@
 
   <audio id="player" controls></audio>
 
-  <!-- 폴백/데이터 보관 -->
+  <!-- 숨김 보관 -->
   <textarea id="b64" class="hidden" readonly></textarea>
   <textarea id="dataurl" class="hidden" readonly></textarea>
-
-  <!-- 메타 저장용 (name/title/subtitle) -->
   <input id="metaName" class="hidden" readonly />
   <input id="metaTitle" class="hidden" readonly />
   <input id="metaSubtitle" class="hidden" readonly />
 
 <script>
 (() => {
-  // ---------- 엘리먼트 참조 ----------
-  const incomingBox   = document.getElementById('incomingBox');
-  const incomingText  = document.getElementById('incomingText');
-  const recordBtn     = document.getElementById('recordBtn');
-  const timerEl       = document.getElementById('timer');
-  const player        = document.getElementById('player');
-  const b64TA         = document.getElementById('b64');
-  const dataTA        = document.getElementById('dataurl');
-  const metaName      = document.getElementById('metaName');
-  const metaTitle     = document.getElementById('metaTitle');
-  const metaSubtitle  = document.getElementById('metaSubtitle');
-  const vuBar         = document.getElementById('vuBar');
+  // ---------- 엘리먼트 ----------
+  const statusText   = document.getElementById('statusText');
+  const incomingBox  = document.getElementById('incomingBox');
+  const incomingText = document.getElementById('incomingText');
+  const recordBtn    = document.getElementById('recordBtn');
+  const timerEl      = document.getElementById('timer');
+  const player       = document.getElementById('player');
+  const b64TA        = document.getElementById('b64');
+  const dataTA       = document.getElementById('dataurl');
+  const metaName     = document.getElementById('metaName');
+  const metaTitle    = document.getElementById('metaTitle');
+  const metaSubtitle = document.getElementById('metaSubtitle');
+  const vuBar        = document.getElementById('vuBar');
 
   // ---------- 전달된 텍스트(4줄) 파싱 ----------
   function readIncoming4Lines() {
@@ -95,11 +99,9 @@
   }
 
   const incoming = readIncoming4Lines();
-  // 메타 저장
   metaName.value = incoming.name;
   metaTitle.value = incoming.title;
   metaSubtitle.value = incoming.subtitle;
-  // 화면 표시(4번째 줄만)
   if (incoming.received) {
     incomingText.innerText = incoming.received;
     incomingBox.style.display = 'block';
@@ -114,6 +116,9 @@
   let mediaRecorder=null, chunks=[], startTs=0, tickId=0;
   let lastBase64='', lastName='', lastMime='';
   let recording = false;
+  let navigating = false;
+  let readyForRecord = false;        // VU 준비 완료 시 true
+  let preparedPayload = '';          // Done 때 즉시 복사할 최종 페이로드(멀티라인)
 
   const fmt = ms => {
     const s=Math.floor(ms/1000),
@@ -121,6 +126,48 @@
           ss=String(s%60).padStart(2,'0');
     return `${m}:${ss}`;
   };
+
+  // ---------- 전환 보조 ----------
+  function cleanupMediaSoon() {
+    setTimeout(() => {
+      try { audioCtx?.close?.(); } catch {}
+      try { stream?.getTracks?.().forEach(t=>t.stop()); } catch {}
+      try { cancelAnimationFrame(rafId); vuBar.style.width='0%'; } catch {}
+    }, 0);
+  }
+  function attemptOpenShortcut(url){
+    if (navigating) return;
+    navigating = true;
+    try {
+      recordBtn.disabled = true;
+      recordBtn.textContent = 'Opening…';
+      recordBtn.classList.remove('danger','done');
+    } catch {}
+    // 전략 1: 같은 제스처에서 앵커 클릭
+    try {
+      const a = document.createElement('a');
+      a.href = url;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch {}
+    // 전략 2/3: 백업 시도
+    setTimeout(() => {
+      if (document.visibilityState === 'visible') {
+        try { location.href = url; } catch {}
+      }
+    }, 80);
+    setTimeout(() => {
+      if (document.visibilityState === 'visible') {
+        try { window.open(url, '_self'); } catch {}
+      }
+    }, 300);
+    cleanupMediaSoon();
+  }
+  window.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') navigating = true;
+  });
+  window.addEventListener('pagehide', () => { navigating = true; });
 
   // ---------- Blob → DataURL ----------
   function blobToDataURL(blob){
@@ -147,7 +194,7 @@
       analyser.getByteTimeDomainData(buf);
       let peak = 0;
       for (let i=0;i<buf.length;i++){
-        const a = Math.abs((buf[i]-128)/128); // -1..1 절대값
+        const a = Math.abs((buf[i]-128)/128);
         if (a > peak) peak = a;
       }
       vuBar.style.width = (Math.min(1, peak*1.8)*100).toFixed(1) + '%';
@@ -159,21 +206,24 @@
   // ---------- 마이크 프리암(페이지 로드 시 실행) ----------
   async function armMicrophone(){
     if (!navigator.mediaDevices?.getUserMedia){
-      alert('이 환경에서는 마이크 접근을 지원하지 않습니다.');
+      statusText.textContent = '이 환경에서는 마이크 접근을 지원하지 않습니다.';
       return;
     }
-    // 1) 스트림 열기 (권한 요청은 여기서 1회 수행)
-    stream = await navigator.mediaDevices.getUserMedia({ audio:true });
-
-    // 2) VU 표시용 오디오 파이프라인 구성
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const source = audioCtx.createMediaStreamSource(stream);
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 2048;
-    source.connect(analyser);
-
-    // 3) VU 루프 시작
-    resumeVU();
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      resumeVU();
+      readyForRecord = true;
+      statusText.textContent = '마이크 준비 완료.';
+      recordBtn.style.display = 'inline-block'; // ✅ 준비된 뒤에만 Record 노출
+    } catch (e){
+      console.error(e);
+      statusText.textContent = '마이크 권한 요청에 실패했습니다. 설정 > Safari > 마이크를 확인하세요.';
+    }
   }
 
   // ---------- 타이머 ----------
@@ -187,37 +237,58 @@
     timerEl.textContent = '00:00';
   }
 
-  // ---------- 녹음 시작/정지 ----------
+  // ---------- 녹음 ----------
   async function startRecording(){
-    if (!stream){
-      await armMicrophone(); // 이론상 이미 열려 있어야 함
+    if (!readyForRecord){
+      alert('마이크가 아직 준비되지 않았습니다.');
+      return;
     }
     chunks = [];
-    // Safari 친화 m4a 우선
     const mime = (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/mp4;codecs=mp4a.40.2'))
       ? 'audio/mp4;codecs=mp4a.40.2'
       : ((MediaRecorder.isTypeSupported('audio/mp4')) ? 'audio/mp4' : '');
 
-    // ★ 비트레이트 (예: 48kbps). 64kbps 원하면 64000으로 변경
+    // 비트레이트: 64kbps 권장(안정성/용량 밸런스) — 필요 시 변경
     const options = mime
-      ? { mimeType: mime, audioBitsPerSecond: 48000 }
-      : { audioBitsPerSecond: 48000 };
+      ? { mimeType: mime, audioBitsPerSecond: 64000 }
+      : { audioBitsPerSecond: 64000 };
 
     mediaRecorder = new MediaRecorder(stream, options);
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
-    mediaRecorder.onstop = async () => {
+    mediaRecorder.start(250);
+    recording = true;
+    startTimer();
+    recordBtn.textContent = 'Stop';
+    recordBtn.classList.add('danger');
+  }
+
+  // Stop 누르면: 처리(Blob→DataURL, payload 구성, VU/오디오 정리 준비) 완료 후에만 Done 노출
+  async function stopAndProcess(){
+    if (!mediaRecorder || !recording) return;
+    recordBtn.disabled = true;
+    recordBtn.textContent = 'Processing…';
+    recordBtn.classList.remove('danger','done');
+
+    try {
+      try { mediaRecorder.requestData && mediaRecorder.requestData(); } catch {}
+      await new Promise(res => {
+        mediaRecorder.onstop = res;
+        try { mediaRecorder.stop(); } catch { res(); }
+      });
       recording = false;
       stopTimer();
 
+      // Blob 만들기
       const type = mediaRecorder.mimeType || 'audio/mp4';
       const blob = new Blob(chunks, { type });
       const ext  = type.includes('mp4') ? 'm4a' : (type.includes('webm') ? 'webm' : 'm4a');
-      const baseName = metaName.value.trim() || 'recording_' + new Date().toISOString().replace(/[:.]/g,'-');
+      const baseName = (metaName.value.trim() || ('recording_' + new Date().toISOString().replace(/[:.]/g,'-')));
       lastName = `${baseName}.${ext}`;
       lastMime = type;
 
       player.src = URL.createObjectURL(blob);
 
+      // DataURL 변환
       const dataURL = await blobToDataURL(blob);
       dataTA.value = dataURL;
       lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);
@@ -225,50 +296,41 @@
 
       document.title = `Audio Ready: ${lastName}`;
 
-      // Stop → Done
-      recordBtn.textContent = 'Done';
-      recordBtn.classList.remove('danger');
-      recordBtn.classList.add('done');
+      // 페이로드(멀티라인 5줄) 미리 준비
+      preparedPayload = [
+        metaName.value || '',
+        metaTitle.value || '',
+        metaSubtitle.value || '',
+        incoming.received || '',
+        dataURL || ''
+      ].join('\n');
 
-      // Stop 시점 안정화: VU 일시정지 (오디오는 유지)
+      // Stop 시점 안정화: VU 일시정지(오디오는 유지)
       pauseVU({releaseAudio:true});
-    };
 
-    mediaRecorder.start(250);
-    recording = true;
-    startTimer();
+      // 이제 Done 노출
+      recordBtn.textContent = 'Done';
+      recordBtn.classList.add('done');
+      recordBtn.disabled = false;
 
-    // UI: Record → Stop (대기 없음)
-    recordBtn.textContent = 'Stop';
-    recordBtn.classList.add('danger');
+    } catch (e){
+      console.error(e);
+      alert('녹음 처리 중 오류가 발생했습니다.');
+      recordBtn.textContent = 'Record';
+      recordBtn.disabled = false;
+    }
   }
 
-  async function stopRecording(){
-    if (!mediaRecorder || !recording) return;
-    try { mediaRecorder.requestData && mediaRecorder.requestData(); } catch {}
-    try { mediaRecorder.stop(); } catch {}
-    // 스트림은 유지(VU는 suspend). 필요 시 여기서 tracks.stop()으로 완전 해제 가능
-  }
-
-  // ---------- Done 동기 복사 + 즉시 전환 (팝업 최소화 핵심) ----------
-  function copyMultilineSyncAndOpenShortcut() {
-    if (!dataTA.value){
+  // Done: 동기 복사 + 즉시 전환(연속 백업)
+  function doDoneNavigation(){
+    if (!preparedPayload){
       alert('복사할 녹음이 없습니다.');
       return;
     }
-    // 1) 멀티라인 페이로드(메타 4줄 + DataURL)
-    const payload = [
-      metaName.value || '',
-      metaTitle.value || '',
-      metaSubtitle.value || '',
-      incoming.received || '',
-      dataTA.value || ''
-    ].join('\n');
-
-    // 2) 동기 복사(사용자 제스처 체인 유지) - execCommand 경로 강제
+    // 동기 복사
     try {
       const ta = document.createElement('textarea');
-      ta.value = payload;
+      ta.value = preparedPayload;
       ta.setAttribute('readonly','');
       ta.style.position = 'fixed';
       ta.style.left = '0'; ta.style.bottom = '0'; ta.style.opacity = '0.001';
@@ -277,39 +339,27 @@
       const ok = document.execCommand('copy');
       document.body.removeChild(ta);
       if (!ok) throw new Error('copy-failed');
-    } catch (e) {
+    } catch {
       alert('클립보드 복사 실패');
       return;
     }
-
-    // 3) 같은 제스처 안에서 즉시 전환 (앵커 클릭)
-    const a = document.createElement('a');
-    a.href = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME || 'Save Recording');
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-
-    // 4) 전환 이후 정리는 비동기로 밀어 제스처 체인 방해하지 않기
-    setTimeout(() => {
-      try { audioCtx?.close?.(); } catch {}
-      try { stream?.getTracks?.().forEach(t=>t.stop()); } catch {}
-      try { cancelAnimationFrame(rafId); vuBar.style.width='0%'; } catch {}
-    }, 0);
+    const url = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME || 'Save Recording');
+    attemptOpenShortcut(url);
   }
 
   // ---------- 버튼 핸들러 ----------
   async function onRecordClick(){
     const label = recordBtn.textContent.trim();
-    try{
-      if (label === 'Record'){
+    try {
+      if (label === 'Record') {
         await startRecording();
-      } else if (label === 'Stop'){
-        await stopRecording();
-      } else if (label === 'Done'){
-        // ⚠️ 여기서는 await를 쓰지 않고 동기적으로 처리 → 팝업 완화
-        copyMultilineSyncAndOpenShortcut();
+      } else if (label === 'Stop') {
+        await stopAndProcess();
+      } else if (label === 'Done') {
+        // 동기 복사 + 즉시 전환
+        doDoneNavigation();
       }
-    }catch(e){
+    } catch (e){
       console.error(e);
       alert('처리 중 오류가 발생했습니다.');
     }
@@ -317,11 +367,8 @@
 
   recordBtn.addEventListener('click', onRecordClick);
 
-  // ---------- 초기화: 페이지 로드 즉시 마이크 암 & VU 시작 ----------
-  armMicrophone().catch(e=>{
-    console.error(e);
-    alert('마이크 권한 요청에 실패했습니다.\n설정 > Safari > 마이크를 확인하세요.');
-  });
+  // ---------- 초기화: 페이지 로드 즉시 마이크 암 & VU 준비 ----------
+  armMicrophone();
 })();
 </script>
 </body>
