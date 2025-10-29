@@ -58,6 +58,19 @@
 
 <script>
 (() => {
+  // ---------- 엘리먼트 참조 ----------
+  const incomingBox   = document.getElementById('incomingBox');
+  const incomingText  = document.getElementById('incomingText');
+  const recordBtn     = document.getElementById('recordBtn');
+  const timerEl       = document.getElementById('timer');
+  const player        = document.getElementById('player');
+  const b64TA         = document.getElementById('b64');
+  const dataTA        = document.getElementById('dataurl');
+  const metaName      = document.getElementById('metaName');
+  const metaTitle     = document.getElementById('metaTitle');
+  const metaSubtitle  = document.getElementById('metaSubtitle');
+  const vuBar         = document.getElementById('vuBar');
+
   // ---------- 전달된 텍스트(4줄) 파싱 ----------
   function readIncoming4Lines() {
     const getRaw = () => {
@@ -96,13 +109,6 @@
   const qs = new URLSearchParams(location.search);
   const SHORTCUT_NAME = (qs.get('shortcut') || 'Save Recording').trim();
 
-  const recordBtn = document.getElementById('recordBtn');
-  const timerEl   = document.getElementById('timer');
-  const player    = document.getElementById('player');
-  const b64TA     = document.getElementById('b64');
-  const dataTA    = document.getElementById('dataurl');
-  const vuBar     = document.getElementById('vuBar');
-
   let stream = null;                 // 페이지 로드 즉시 열어 둘 마이크 스트림
   let audioCtx = null, analyser = null, rafId = 0;
   let mediaRecorder=null, chunks=[], startTs=0, tickId=0;
@@ -115,34 +121,6 @@
           ss=String(s%60).padStart(2,'0');
     return `${m}:${ss}`;
   };
-
-  // ---------- 클립보드 복사 유틸 ----------
-  async function copyTextRobust(text){
-    try{
-      if ((location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))
-          && navigator.clipboard && window.isSecureContext){
-        await navigator.clipboard.writeText(text);
-        return;
-      }
-    }catch(e){}
-    try{
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.setAttribute('readonly','');
-      ta.style.position = 'fixed';
-      ta.style.left = '0'; ta.style.bottom = '0'; ta.style.opacity = '0.001';
-      document.body.appendChild(ta);
-      ta.focus(); ta.select(); ta.setSelectionRange(0, ta.value.length);
-      const ok = document.execCommand('copy');
-      document.body.removeChild(ta);
-      if (ok) return;
-    }catch(e){}
-    b64TA.value = text;
-    b64TA.focus(); b64TA.select(); b64TA.setSelectionRange(0, b64TA.value.length);
-    const ok3 = document.execCommand('copy');
-    if (ok3) return;
-    throw new Error('Copy failed');
-  }
 
   // ---------- Blob → DataURL ----------
   function blobToDataURL(blob){
@@ -198,7 +176,7 @@
     resumeVU();
   }
 
-  // ---------- 녹음 시작/정지 ----------
+  // ---------- 타이머 ----------
   function startTimer(){
     startTs = Date.now();
     clearInterval(tickId);
@@ -209,6 +187,7 @@
     timerEl.textContent = '00:00';
   }
 
+  // ---------- 녹음 시작/정지 ----------
   async function startRecording(){
     if (!stream){
       await armMicrophone(); // 이론상 이미 열려 있어야 함
@@ -268,7 +247,54 @@
     if (!mediaRecorder || !recording) return;
     try { mediaRecorder.requestData && mediaRecorder.requestData(); } catch {}
     try { mediaRecorder.stop(); } catch {}
-    // 스트림은 유지(VU는 이미 suspend). 필요 시 여기서 tracks.stop()으로 완전 해제 가능
+    // 스트림은 유지(VU는 suspend). 필요 시 여기서 tracks.stop()으로 완전 해제 가능
+  }
+
+  // ---------- Done 동기 복사 + 즉시 전환 (팝업 최소화 핵심) ----------
+  function copyMultilineSyncAndOpenShortcut() {
+    if (!dataTA.value){
+      alert('복사할 녹음이 없습니다.');
+      return;
+    }
+    // 1) 멀티라인 페이로드(메타 4줄 + DataURL)
+    const payload = [
+      metaName.value || '',
+      metaTitle.value || '',
+      metaSubtitle.value || '',
+      incoming.received || '',
+      dataTA.value || ''
+    ].join('\n');
+
+    // 2) 동기 복사(사용자 제스처 체인 유지) - execCommand 경로 강제
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = payload;
+      ta.setAttribute('readonly','');
+      ta.style.position = 'fixed';
+      ta.style.left = '0'; ta.style.bottom = '0'; ta.style.opacity = '0.001';
+      document.body.appendChild(ta);
+      ta.focus(); ta.select(); ta.setSelectionRange(0, ta.value.length);
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (!ok) throw new Error('copy-failed');
+    } catch (e) {
+      alert('클립보드 복사 실패');
+      return;
+    }
+
+    // 3) 같은 제스처 안에서 즉시 전환 (앵커 클릭)
+    const a = document.createElement('a');
+    a.href = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME || 'Save Recording');
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+
+    // 4) 전환 이후 정리는 비동기로 밀어 제스처 체인 방해하지 않기
+    setTimeout(() => {
+      try { audioCtx?.close?.(); } catch {}
+      try { stream?.getTracks?.().forEach(t=>t.stop()); } catch {}
+      try { cancelAnimationFrame(rafId); vuBar.style.width='0%'; } catch {}
+    }, 0);
   }
 
   // ---------- 버튼 핸들러 ----------
@@ -280,32 +306,8 @@
       } else if (label === 'Stop'){
         await stopRecording();
       } else if (label === 'Done'){
-        if (!dataTA.value){
-          alert('복사할 녹음이 없습니다.');
-          return;
-        }
-        // 멀티라인 페이로드: name, title, subtitle, received, dataURL(5행)
-        const payload = [
-          metaName.value || '',
-          metaTitle.value || '',
-          metaSubtitle.value || '',
-          incoming.received || '',
-          dataTA.value || ''
-        ].join('\n');
-
-        try {
-          await copyTextRobust(payload);
-
-          // 네비게이션 안정화: 리소스 정리 + 짧은 대기
-          try { await audioCtx?.close?.(); } catch {}
-          try { stream?.getTracks?.().forEach(t=>t.stop()); } catch {}
-          pauseVU(); // 0%로
-
-          await new Promise(r=>setTimeout(r, 50));
-          location.href = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME || 'Save Recording');
-        } catch {
-          alert('클립보드 복사 실패');
-        }
+        // ⚠️ 여기서는 await를 쓰지 않고 동기적으로 처리 → 팝업 완화
+        copyMultilineSyncAndOpenShortcut();
       }
     }catch(e){
       console.error(e);
