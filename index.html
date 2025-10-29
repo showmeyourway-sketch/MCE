@@ -154,6 +154,30 @@
     });
   }
 
+  // ---------- VU 제어 ----------
+  function pauseVU({releaseAudio=false}={}){
+    try { cancelAnimationFrame(rafId); } catch {}
+    vuBar.style.width = '0%';
+    if (releaseAudio) {
+      try { audioCtx && audioCtx.suspend && audioCtx.suspend(); } catch {}
+    }
+  }
+  function resumeVU(){
+    if (!analyser) return;
+    const buf = new Uint8Array(analyser.fftSize || 2048);
+    const draw = () => {
+      analyser.getByteTimeDomainData(buf);
+      let peak = 0;
+      for (let i=0;i<buf.length;i++){
+        const a = Math.abs((buf[i]-128)/128); // -1..1 절대값
+        if (a > peak) peak = a;
+      }
+      vuBar.style.width = (Math.min(1, peak*1.8)*100).toFixed(1) + '%';
+      rafId = requestAnimationFrame(draw);
+    };
+    draw();
+  }
+
   // ---------- 마이크 프리암(페이지 로드 시 실행) ----------
   async function armMicrophone(){
     if (!navigator.mediaDevices?.getUserMedia){
@@ -167,26 +191,11 @@
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const source = audioCtx.createMediaStreamSource(stream);
     analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 2048; // 타임도메인 레벨
+    analyser.fftSize = 2048;
     source.connect(analyser);
 
     // 3) VU 루프 시작
-    const buf = new Uint8Array(analyser.fftSize);
-    const draw = () => {
-      analyser.getByteTimeDomainData(buf);
-      // Peak 기반 간단 레벨 측정
-      let peak = 0;
-      for (let i=0;i<buf.length;i++){
-        const v = (buf[i]-128)/128; // -1..1
-        const a = Math.abs(v);
-        if (a > peak) peak = a;
-      }
-      // 약간의 감도 보정
-      let level = Math.min(1, peak * 1.8);
-      vuBar.style.width = (level*100).toFixed(1) + '%';
-      rafId = requestAnimationFrame(draw);
-    };
-    draw();
+    resumeVU();
   }
 
   // ---------- 녹음 시작/정지 ----------
@@ -205,12 +214,12 @@
       await armMicrophone(); // 이론상 이미 열려 있어야 함
     }
     chunks = [];
-    // Safari 친화 m4a 우선, 필요시 변경 가능
+    // Safari 친화 m4a 우선
     const mime = (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/mp4;codecs=mp4a.40.2'))
       ? 'audio/mp4;codecs=mp4a.40.2'
       : ((MediaRecorder.isTypeSupported('audio/mp4')) ? 'audio/mp4' : '');
 
-    // ★ 비트레이트 조절 (예: 48kbps) — 64kbps로 원하면 64000으로 변경
+    // ★ 비트레이트 (예: 48kbps). 64kbps 원하면 64000으로 변경
     const options = mime
       ? { mimeType: mime, audioBitsPerSecond: 48000 }
       : { audioBitsPerSecond: 48000 };
@@ -241,13 +250,16 @@
       recordBtn.textContent = 'Done';
       recordBtn.classList.remove('danger');
       recordBtn.classList.add('done');
+
+      // Stop 시점 안정화: VU 일시정지 (오디오는 유지)
+      pauseVU({releaseAudio:true});
     };
 
     mediaRecorder.start(250);
     recording = true;
     startTimer();
 
-    // UI: Record → Stop (바로, Ready/대기 없음)
+    // UI: Record → Stop (대기 없음)
     recordBtn.textContent = 'Stop';
     recordBtn.classList.add('danger');
   }
@@ -256,7 +268,7 @@
     if (!mediaRecorder || !recording) return;
     try { mediaRecorder.requestData && mediaRecorder.requestData(); } catch {}
     try { mediaRecorder.stop(); } catch {}
-    // 스트림은 계속 유지 (VU 용) — 필요 시 여기서 끄려면 tracks.stop()
+    // 스트림은 유지(VU는 이미 suspend). 필요 시 여기서 tracks.stop()으로 완전 해제 가능
   }
 
   // ---------- 버튼 핸들러 ----------
@@ -281,9 +293,19 @@
           dataTA.value || ''
         ].join('\n');
 
-        await copyTextRobust(payload);
-        const url = "shortcuts://run-shortcut?name=" + encodeURIComponent('Save Recording');
-        location.href = url;
+        try {
+          await copyTextRobust(payload);
+
+          // 네비게이션 안정화: 리소스 정리 + 짧은 대기
+          try { await audioCtx?.close?.(); } catch {}
+          try { stream?.getTracks?.().forEach(t=>t.stop()); } catch {}
+          pauseVU(); // 0%로
+
+          await new Promise(r=>setTimeout(r, 50));
+          location.href = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME || 'Save Recording');
+        } catch {
+          alert('클립보드 복사 실패');
+        }
       }
     }catch(e){
       console.error(e);
