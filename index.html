@@ -54,6 +54,18 @@
 
 <script>
 (() => {
+  // ---------- DOM 요소 선택 ----------
+  const recordBtn = document.getElementById('recordBtn');
+  const timerEl   = document.getElementById('timer');
+  const player    = document.getElementById('player');
+  const b64TA     = document.getElementById('b64');
+  const dataTA    = document.getElementById('dataurl');
+  const metaNameEl = document.getElementById('metaName');
+  const metaTitleEl = document.getElementById('metaTitle');
+  const metaSubtitleEl = document.getElementById('metaSubtitle');
+  const incomingBox = document.getElementById('incomingBox');
+  const incomingText = document.getElementById('incomingText');
+
   // ---------- 전달된 텍스트(4줄) 파싱 ----------
   function readIncoming4Lines() {
     const getRaw = () => {
@@ -79,9 +91,9 @@
 
   const incoming = readIncoming4Lines();
   // 메타 저장
-  metaName.value = incoming.name;
-  metaTitle.value = incoming.title;
-  metaSubtitle.value = incoming.subtitle;
+  metaNameEl.value = incoming.name;
+  metaTitleEl.value = incoming.title;
+  metaSubtitleEl.value = incoming.subtitle;
   // 화면 표시(4번째 줄만)
   if (incoming.received) {
     incomingText.innerText = incoming.received;
@@ -91,12 +103,6 @@
   // ---------- 녹음 기능 ----------
   const qs = new URLSearchParams(location.search);
   const SHORTCUT_NAME = (qs.get('shortcut') || 'Save Recording').trim();
-
-  const recordBtn = document.getElementById('recordBtn');
-  const timerEl   = document.getElementById('timer');
-  const player    = document.getElementById('player');
-  const b64TA     = document.getElementById('b64');
-  const dataTA    = document.getElementById('dataurl');
 
   let mediaRecorder=null, chunks=[], startTs=0, tickId=0;
   let lastBase64='', lastName='', lastMime='';
@@ -168,8 +174,8 @@
     const mime = pickMime();
     // 64kbps로 용량 절감
     const options = mime
-      ? { mimeType: mime, audioBitsPerSecond: 48000 }
-      : { audioBitsPerSecond: 48000 };
+      ? { mimeType: mime, audioBitsPerSecond: 64000 }
+      : { audioBitsPerSecond: 64000 };
     mediaRecorder = new MediaRecorder(stream, options);
 
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
@@ -181,22 +187,27 @@
       lastMime = type;
       const ext  = type.includes('mp4') ? 'm4a' : (type.includes('webm') ? 'webm' : 'm4a');
       // 파일명은 name이 있으면 우선 사용, 없으면 timestamp
-      const baseName = metaName.value.trim() || 'recording_' + new Date().toISOString().replace(/[:.]/g,'-');
+      const baseName = metaNameEl.value.trim() || 'recording_' + new Date().toISOString().replace(/[:.]/g,'-');
       lastName = `${baseName}.${ext}`;
       player.src = URL.createObjectURL(blob);
 
-      const dataURL = await blobToDataURL(blob);
-      dataTA.value = dataURL;
-      lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);
-      b64TA.value = lastBase64;
+      try {
+        const dataURL = await blobToDataURL(blob);
+        dataTA.value = dataURL;
+        lastBase64 = dataURL.slice(dataURL.indexOf(',')+1);
+        b64TA.value = lastBase64;
 
-      // 문서 제목에도 남겨두기
-      document.title = `Audio Ready: ${lastName}`;
+        // 문서 제목에도 남겨두기
+        document.title = `Audio Ready: ${lastName}`;
 
-      // Stop → Done 으로 전환
-      recordBtn.textContent = 'Done';
-      recordBtn.classList.remove('danger');
-      recordBtn.classList.add('done');
+        // Stop → Done 으로 전환
+        recordBtn.textContent = 'Done';
+        recordBtn.classList.remove('danger');
+        recordBtn.classList.add('done');
+      } catch(e) {
+        console.error('Data URL 변환 실패:', e);
+        alert('녹음 파일 처리 중 오류가 발생했습니다.');
+      }
     };
 
     startTs = Date.now();
@@ -204,8 +215,10 @@
     mediaRecorder.start(250);
     recordBtn.textContent = 'Ready';
     recordBtn.classList.add('danger');
+    recordBtn.disabled = true;
     await sleep(1000);
     recordBtn.textContent = 'Stop';
+    recordBtn.disabled = false;
   }
 
   async function stopRec(){
@@ -226,6 +239,7 @@
         timerEl.textContent = '00:00';
         recordBtn.textContent = 'Record';
         recordBtn.className = '';
+        recordBtn.disabled = false;
         mediaRecorder = null;
       }
     } else if (label === 'Stop') {
@@ -237,16 +251,16 @@
       }
       // 멀티라인 페이로드: name, title, subtitle, received, dataURL(5행)
       const payload = [
-        metaName.value || '',
-        metaTitle.value || '',
-        metaSubtitle.value || '',
+        metaNameEl.value || '',
+        metaTitleEl.value || '',
+        metaSubtitleEl.value || '',
         incoming.received || '',
         dataTA.value || ''
       ].join('\n');
 
       try {
         await copyTextRobust(payload);
-        const url = "shortcuts://run-shortcut?name=" + encodeURIComponent('Save Recording');
+        const url = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME);
         location.href = url;
       } catch {
         alert('클립보드 복사 실패');
