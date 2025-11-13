@@ -37,7 +37,8 @@
   </div>
 
   <div class="row">
-    <button id="recordBtn">Record</button>
+    <button id="recordBtn" style="display:none;">Record</button>
+    <div id="loadingMsg" style="color:#666; font-size:14px;">마이크 권한을 요청 중...</div>
     <span id="timer">00:00</span>
   </div>
 
@@ -65,6 +66,7 @@
   const metaSubtitleEl = document.getElementById('metaSubtitle');
   const incomingBox = document.getElementById('incomingBox');
   const incomingText = document.getElementById('incomingText');
+  const loadingMsg = document.getElementById('loadingMsg');
 
   // ---------- 전달된 텍스트(4줄) 파싱 ----------
   function readIncoming4Lines() {
@@ -106,6 +108,7 @@
 
   let mediaRecorder=null, chunks=[], startTs=0, tickId=0;
   let lastBase64='', lastName='', lastMime='';
+  let mediaStream=null; // 미리 받은 스트림 저장
 
   const fmt = ms => {
     const s=Math.floor(ms/1000),
@@ -165,18 +168,17 @@
   }
 
   async function startRec(){
-    if (!navigator.mediaDevices?.getUserMedia){
-      alert('이 환경에서는 마이크 접근을 지원하지 않습니다.');
+    if (!mediaStream) {
+      alert('마이크 스트림이 준비되지 않았습니다.');
       return;
     }
-    const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
     chunks = [];
     const mime = pickMime();
     // 64kbps로 용량 절감
     const options = mime
       ? { mimeType: mime, audioBitsPerSecond: 64000 }
       : { audioBitsPerSecond: 64000 };
-    mediaRecorder = new MediaRecorder(stream, options);
+    mediaRecorder = new MediaRecorder(mediaStream, options);
 
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
     mediaRecorder.onstop = async () => {
@@ -224,7 +226,7 @@
   async function stopRec(){
     if (!mediaRecorder) return;
     mediaRecorder.stop();
-    try { mediaRecorder.stream.getTracks().forEach(t=>t.stop()); } catch {}
+    // 스트림은 유지 (다시 녹음할 수 있도록)
   }
 
   async function onRecordClick(){
@@ -269,6 +271,35 @@
   }
 
   recordBtn.addEventListener('click', onRecordClick);
+
+  // ---------- 페이지 로드 시 마이크 권한 요청 ----------
+  (async function initMicrophone() {
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        loadingMsg.textContent = '이 브라우저는 마이크를 지원하지 않습니다.';
+        loadingMsg.style.color = '#ff3b30';
+        return;
+      }
+      
+      loadingMsg.textContent = '마이크 권한을 요청 중...';
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      // 마이크 준비 완료
+      loadingMsg.style.display = 'none';
+      recordBtn.style.display = 'block';
+      
+    } catch(e) {
+      console.error('마이크 권한 오류:', e);
+      if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
+        loadingMsg.textContent = '마이크 권한이 거부되었습니다. 브라우저 설정에서 권한을 허용해주세요.';
+      } else if (e.name === 'NotFoundError') {
+        loadingMsg.textContent = '마이크를 찾을 수 없습니다.';
+      } else {
+        loadingMsg.textContent = '마이크 초기화 실패: ' + e.message;
+      }
+      loadingMsg.style.color = '#ff3b30';
+    }
+  })();
 })();
 </script>
 </body>
