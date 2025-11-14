@@ -36,7 +36,7 @@
 
   <div class="row">
     <button id="recordBtn" style="display:none;">Record</button>
-    <div id="loadingMsg" style="color:#666; font-size:14px;">마이크 권한을 요청 중...</div>
+    <div id="loadingMsg" style="color:#666; font-size:14px;">Requesting microphone access...</div>
     <span id="timer">00:00</span>
   </div>
 
@@ -268,12 +268,12 @@
   (async function initMicrophone() {
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
-        loadingMsg.textContent = '이 브라우저는 마이크를 지원하지 않습니다.';
+        loadingMsg.textContent = 'This browser does not support microphone access.';
         loadingMsg.style.color = '#ff3b30';
         return;
       }
       
-      loadingMsg.textContent = '마이크 권한을 요청 중...';
+      loadingMsg.textContent = 'Requesting microphone access...';
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
       // 마이크 준비 완료
@@ -283,11 +283,11 @@
     } catch(e) {
       console.error('마이크 권한 오류:', e);
       if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
-        loadingMsg.textContent = '마이크 권한이 거부되었습니다. 브라우저 설정에서 권한을 허용해주세요.';
+        loadingMsg.textContent = 'Microphone permission denied. Please allow access in your browser settings.';
       } else if (e.name === 'NotFoundError') {
-        loadingMsg.textContent = '마이크를 찾을 수 없습니다.';
+        loadingMsg.textContent = 'Microphone not found.';
       } else {
-        loadingMsg.textContent = '마이크 초기화 실패: ' + e.message;
+        loadingMsg.textContent = 'Microphone initialization failed: ' + e.message;
       }
       loadingMsg.style.color = '#ff3b30';
     }
